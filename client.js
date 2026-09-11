@@ -576,6 +576,17 @@ section[data-workbuddy-model-group] > button[role="menuitemradio"] > span:first-
       panel.style.top = `${top}px`;
     }
 
+    function placeWorkBuddyMenu(menu) {
+      const trigger = Array.from(document.querySelectorAll('button[aria-controls]'))
+        .find((button) => button.getAttribute("aria-controls") === menu.id);
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      const width = menu.offsetWidth || Math.min(380, window.innerWidth - 32);
+      const margin = 12;
+      const left = Math.min(Math.max(rect.right - width, margin), window.innerWidth - width - margin);
+      menu.style.left = `${left}px`;
+    }
+
     function showModelDetail(button, model) {
       clearTimeout(detailTimer);
       activeModelButton = button;
@@ -692,7 +703,13 @@ section[data-workbuddy-model-group] > button[role="menuitemradio"] > span:first-
         if (heading?.textContent?.trim() !== "WorkBuddy 中国区") continue;
         found = true;
         section.dataset.workbuddyModelGroup = "";
-        section.closest('[role="menu"]')?.classList.add("dsh-wb-model-menu");
+        const menu = section.closest('[role="menu"]');
+        if (menu) {
+          menu.classList.add("dsh-wb-model-menu");
+          // DSH measures the root pane before this wider model pane exists. Reposition
+          // immediately after fixing the width so the menu does not jump on refresh.
+          placeWorkBuddyMenu(menu);
+        }
         for (const button of section.querySelectorAll('button, [role="menuitemradio"], [role="menuitem"]')) {
           if (modelForButton(button)) enhanceModelButton(button);
         }

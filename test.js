@@ -35,6 +35,7 @@ test("客户端兼容包装 Provider 并将 WorkBuddy 用量并入统计行", ()
   assert.match(client, /data-workbuddy-model-rate/);
   assert.match(client, /\\p\{L\}\\p\{N\}/);
   assert.match(client, /section\.querySelectorAll\('button, \[role="menuitemradio"\], \[role="menuitem"\]'\)/);
+  assert.match(client, /placeWorkBuddyMenu\(menu\)/);
   assert.match(client, /消耗速度/);
   assert.doesNotMatch(client, /EFFORT_TRANSLATIONS/);
   assert.match(client, /dsh-wb-stats/);

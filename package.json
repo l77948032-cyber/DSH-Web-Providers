@@ -1,6 +1,6 @@
 {
   "name": "@l77948032-cyber/dsh-workbuddy",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "以独立 Provider 为 DeepSeek Harness 接入 WorkBuddy API Key 或网页登录令牌",
   "author": "l77948032-cyber; based on Axiaohungry/dsh-llm-workbuddy",
   "keywords": [
