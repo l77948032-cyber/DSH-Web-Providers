@@ -28,6 +28,7 @@ import { fetchWorkBuddyCredits } from "./workbuddy-credits.js";
 
 const PROVIDER = "workbuddy-cn";
 const LEGACY_PROVIDER = "codebuddy-cn";
+const SETTINGS_NS = "llm-workbuddy";
 const API_KEY_ENV = "WORKBUDDY_API_KEY";
 const LEGACY_API_KEY_ENV = "CODEBUDDY_API_KEY";
 const ROUTE = "/dsh-llm-workbuddy/auth";
@@ -72,20 +73,20 @@ async function requestBody(req) {
 }
 
 async function setMode(settings, mode, apiKeyRef = API_KEY_ENV) {
-  const config = settings.get("llm-pi-ai");
+  const config = settings.get(SETTINGS_NS);
   const providers = config?.providers ?? {};
   const exists = Object.hasOwn(providers, PROVIDER);
   const legacy = !exists && Object.hasOwn(providers, LEGACY_PROVIDER) ? providers[LEGACY_PROVIDER] : undefined;
   const path = ["providers", PROVIDER];
   if (!exists) {
     const value = { ...(legacy ?? {}), ...(mode === "token" ? {} : { apiKeyEnv: apiKeyRef }) };
-    await settings.mutate("llm-pi-ai", [
+    await settings.mutate(SETTINGS_NS, [
       { op: "set", path, value },
       ...(legacy ? [{ op: "unset", path: ["providers", LEGACY_PROVIDER] }] : []),
     ]);
     return;
   }
-  await settings.mutate("llm-pi-ai", [
+  await settings.mutate(SETTINGS_NS, [
     {
       op: mode === "token" ? "unset" : "set",
       path: [...path, "apiKeyEnv"],
@@ -96,7 +97,7 @@ async function setMode(settings, mode, apiKeyRef = API_KEY_ENV) {
 }
 
 function configuredApiKeyRef(settings) {
-  const providers = settings.get("llm-pi-ai")?.providers ?? {};
+  const providers = settings.get(SETTINGS_NS)?.providers ?? {};
   return providers[PROVIDER]?.apiKeyEnv ?? providers[LEGACY_PROVIDER]?.apiKeyEnv ?? API_KEY_ENV;
 }
 
@@ -134,7 +135,7 @@ async function writeApiKeyStore(credentials, store) {
 
 async function currentApiKeyState(webCtx) {
   const store = await readApiKeyStore(webCtx.credentials);
-  const apiMode = authenticationMode(webCtx.settings.get("llm-pi-ai")) === "api-key";
+  const apiMode = authenticationMode(webCtx.settings.get(SETTINGS_NS)) === "api-key";
   const ref = apiMode ? configuredApiKeyRef(webCtx.settings) : undefined;
   const items = [];
   const seenRefs = new Set();
@@ -241,7 +242,7 @@ export function installWorkBuddyWeb(ctx) {
       const apiKeys = await currentApiKeyState(webCtx);
       return {
         ok: true,
-        mode: authenticationMode(webCtx.settings.get("llm-pi-ai")),
+        mode: authenticationMode(webCtx.settings.get(SETTINGS_NS)),
         authenticated: active !== undefined,
         activeAccountId: active?.id ?? null,
         accounts: workBuddySessionAccounts(store),
@@ -318,7 +319,7 @@ export function installWorkBuddyWeb(ctx) {
         await webCtx.credentials.unset(credentialRef(entry.ref));
         const remaining = store.entries.filter((item) => item.id !== entry.id);
         await writeApiKeyStore(webCtx.credentials, { version: 1, activeId: remaining[0]?.id, entries: remaining });
-        if (authenticationMode(webCtx.settings.get("llm-pi-ai")) === "api-key" && activeRef === entry.ref) {
+        if (authenticationMode(webCtx.settings.get(SETTINGS_NS)) === "api-key" && activeRef === entry.ref) {
           const environment = await webCtx.credentials.resolve(credentialRef(API_KEY_ENV));
           let fallback = API_KEY_ENV;
           if (!environment?.value) {
@@ -356,7 +357,7 @@ export function installWorkBuddyWeb(ctx) {
       if (req.method !== "POST") return json(res, 405, { ok: false, message: "Method not allowed" });
       if (!localPost(req)) return json(res, 403, { ok: false, message: "只允许从本机 DSH 页面查询 WorkBuddy 积分" });
       try {
-        if (authenticationMode(webCtx.settings.get("llm-pi-ai")) !== "token") {
+        if (authenticationMode(webCtx.settings.get(SETTINGS_NS)) !== "token") {
           return json(res, 200, {
             ok: true,
             accountId: null,

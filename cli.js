@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { chmodSync, copyFileSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { delimiter, dirname, join, resolve } from "node:path";
@@ -20,13 +21,15 @@ import {
   upsertWorkBuddySession,
 } from "./workbuddy-auth.js";
 
-const PACKAGE = "@axiaohungry/dsh-llm-workbuddy";
-const LEGACY_PACKAGES = ["dsh-llm-workbuddy", "dsh-llm-codebuddy"];
+const PACKAGE = "@l77948032-cyber/dsh-workbuddy";
+const LEGACY_PACKAGES = ["@axiaohungry/dsh-llm-workbuddy", "dsh-llm-workbuddy", "dsh-llm-codebuddy"];
 const PACKAGE_VERSION = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version;
-const PACKAGE_SPEC = `${PACKAGE}@${PACKAGE_VERSION}`;
-const PROVIDER_PATH = ["llm-pi-ai", "providers", "workbuddy-cn"];
-const LEGACY_PROVIDER_PATH = ["llm-pi-ai", "providers", "codebuddy-cn"];
+const PACKAGE_SPEC = process.env.DSH_WORKBUDDY_PACKAGE_SPEC || `github:l77948032-cyber/DSH-Workbuddy#v${PACKAGE_VERSION}`;
+const SETTINGS_NS = "llm-workbuddy";
+const PROVIDER_PATH = [SETTINGS_NS, "providers", "workbuddy-cn"];
+const LEGACY_PROVIDER_PATH = [SETTINGS_NS, "providers", "codebuddy-cn"];
 const IGNORED_BUILDS = ["@google/genai", "protobufjs"];
+const PROFILES = new Set(["desktop", "web", "headless"]);
 const require = createRequire(import.meta.url);
 
 function dshHome() {
@@ -55,19 +58,70 @@ function dshEnv() {
   };
 }
 
+function desktopDsh() {
+  if (process.platform !== "darwin") return undefined;
+  const candidates = [
+    process.env.DSH_DESKTOP_APP,
+    "/Applications/DSH Desktop.app",
+    join(homedir(), "Applications", "DSH Desktop.app"),
+  ].filter(Boolean);
+  for (const app of candidates) {
+    const command = join(app, "Contents", "MacOS", "DSH Desktop");
+    const archive = join(app, "Contents", "Resources", "app.asar");
+    if (existsSync(command) && existsSync(archive)) {
+      return { command, prefix: [join(archive, "lib", "desktop-cli.js")] };
+    }
+  }
+  return undefined;
+}
+
+function commandOnPath(command) {
+  const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") || "PATH";
+  return (process.env[pathKey] || "").split(delimiter).map((entry) => join(entry, command)).find(existsSync);
+}
+
+function dshInvocation(args) {
+  const desktop = desktopDsh();
+  const wantsDesktop = args.some((value, index) => value === "--profile" && args[index + 1] === "desktop");
+  if (wantsDesktop && desktop) return { ...desktop, desktop: true };
+  const command = commandOnPath(process.platform === "win32" ? "dsh.cmd" : "dsh");
+  if (command) return { command, prefix: [] };
+  if (desktop) return { ...desktop, desktop: true };
+  return { command: process.platform === "win32" ? "dsh.cmd" : "dsh", prefix: [] };
+}
+
 function runDsh(args) {
-  const result = spawnSync(process.platform === "win32" ? "dsh.cmd" : "dsh", args, {
+  const invocation = dshInvocation(args);
+  const env = dshEnv();
+  if (invocation.desktop) env.ELECTRON_RUN_AS_NODE = "1";
+  const result = spawnSync(invocation.command, [...invocation.prefix, ...args], {
     stdio: "inherit",
-    shell: process.platform === "win32",
-    env: dshEnv(),
+    shell: process.platform === "win32" && invocation.prefix.length === 0,
+    env,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`dsh ${args.join(" ")} 执行失败（退出码 ${result.status}）`);
 }
 
-function writeYamlDocument(file, document) {
-  const temporary = join(dirname(file), `.workbuddy-${process.pid}.tmp`);
-  writeFileSync(temporary, String(document), "utf8");
+function selectedProfiles(args = []) {
+  const profiles = [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] !== "--profile" || !args[index + 1]) throw new Error(`未知参数：${args[index]}`);
+    const profile = args[index + 1];
+    if (!PROFILES.has(profile)) throw new Error(`不支持的 Profile：${profile}`);
+    profiles.push(profile);
+    index += 1;
+  }
+  if (profiles.length) return [...new Set(profiles)];
+  return desktopDsh() ? ["desktop"] : ["web", "headless"];
+}
+
+function writeYamlDocument(file, document, mode) {
+  const existingMode = existsSync(file) ? statSync(file).mode & 0o777 : undefined;
+  const targetMode = mode ?? existingMode ?? 0o600;
+  const temporary = join(dirname(file), `.workbuddy-${process.pid}-${randomBytes(6).toString("hex")}.tmp`);
+  writeFileSync(temporary, String(document), { encoding: "utf8", flag: "wx", mode: targetMode });
+  chmodSync(temporary, targetMode);
   renameSync(temporary, file);
 }
 
@@ -124,10 +178,8 @@ function cleanSettings(file) {
   for (const path of paths) document.deleteIn(path);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const backup = `${file}.workbuddy-backup-${stamp}`;
-  const temporary = join(dirname(file), `.settings-workbuddy-${process.pid}.tmp`);
   copyFileSync(file, backup);
-  writeFileSync(temporary, String(document), "utf8");
-  renameSync(temporary, file);
+  writeYamlDocument(file, document);
   return backup;
 }
 
@@ -168,9 +220,11 @@ function storeLoginSession(session, home = dshHome()) {
   document.delete(LEGACY_SESSION_REF);
   if (existsSync(file)) {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    copyFileSync(file, `${file}.workbuddy-backup-${stamp}`);
+    const backup = `${file}.workbuddy-backup-${stamp}`;
+    copyFileSync(file, backup);
+    chmodSync(backup, 0o600);
   }
-  writeYamlDocument(file, document);
+  writeYamlDocument(file, document, 0o600);
 }
 
 async function login() {
@@ -184,8 +238,8 @@ async function login() {
   console.log("WorkBuddy 令牌登录成功，Provider 已切换为令牌模式。请重启 DSH。");
 }
 
-function install() {
-  for (const profile of ["web", "headless"]) {
+function install(args) {
+  for (const profile of selectedProfiles(args)) {
     runDsh(["plugin", "--profile", profile, "list", "--depth", "0"]);
     const workspace = join(dshHome(), "profiles", profile, "pnpm-workspace.yaml");
     withPnpmBuildPolicy(workspace, () => {
@@ -200,9 +254,9 @@ function install() {
   console.log("WorkBuddy Provider 已安装。请重启 DSH 后进行配置。");
 }
 
-function uninstall(home = dshHome()) {
+function uninstall(home = dshHome(), args = []) {
   const backup = cleanSettings(join(home, "settings.yaml"));
-  for (const profile of ["web", "headless"]) {
+  for (const profile of selectedProfiles(args)) {
     const workspace = join(home, "profiles", profile, "pnpm-workspace.yaml");
     const installedPackages = [PACKAGE, ...LEGACY_PACKAGES].filter((packageName) => profileHasPackage(home, profile, packageName));
     if (installedPackages.length) {
@@ -222,7 +276,7 @@ function selfTest() {
   const root = mkdtempSync(join(tmpdir(), "dsh-workbuddy-cli-"));
   try {
     const file = join(root, "settings.yaml");
-    writeFileSync(file, "llm-pi-ai:\n  providers:\n    opencode-go:\n      apiKeyEnv: OPENCODE_GO_API_KEY\n    codebuddy-cn:\n      apiKeyEnv: WORKBUDDY_CN_API_KEY\n      models:\n        - id: legacy-model\n", "utf8");
+    writeFileSync(file, "llm-pi-ai:\n  providers:\n    opencode-go:\n      apiKeyEnv: OPENCODE_GO_API_KEY\nllm-workbuddy:\n  providers:\n    codebuddy-cn:\n      apiKeyEnv: WORKBUDDY_CN_API_KEY\n      models:\n        - id: legacy-model\n", "utf8");
     enableTokenLogin(root);
     const tokenMode = parseDocument(readFileSync(file, "utf8"));
     if (tokenMode.hasIn([...PROVIDER_PATH, "apiKeyEnv"]) || !tokenMode.hasIn(PROVIDER_PATH) || tokenMode.hasIn(LEGACY_PROVIDER_PATH) || !tokenMode.hasIn([...PROVIDER_PATH, "models", 0, "id"])) {
@@ -251,6 +305,9 @@ function selfTest() {
     if (sessionStore.sessions.length !== 1 || sessionStore.activeId !== sessionStore.sessions[0].id) {
       throw new Error("token account list self-test failed");
     }
+    if ((statSync(join(root, ".credentials.yaml")).mode & 0o777) !== 0o600) {
+      throw new Error("token credential file permissions self-test failed");
+    }
     const workspace = join(root, "pnpm-workspace.yaml");
     writeFileSync(workspace, "packages:\n  - .\nallowBuilds:\n  '@google/genai': true\n  protobufjs: pending\n", "utf8");
     withPnpmBuildPolicy(workspace, () => {
@@ -272,6 +329,9 @@ function selfTest() {
     if (!dshEnv()[pathKey].split(delimiter)[0].endsWith(join("node_modules", ".bin"))) {
       throw new Error("bundled pnpm PATH self-test failed");
     }
+    if (selectedProfiles(["--profile", "web", "--profile", "web"]).join(",") !== "web") {
+      throw new Error("profile selection self-test failed");
+    }
     console.log("CLI-SELF-TEST-OK");
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -279,11 +339,12 @@ function selfTest() {
 }
 
 const command = process.argv[2];
-if (command === "install") install();
-else if (command === "uninstall") uninstall();
+const args = process.argv.slice(3);
+if (command === "install") install(args);
+else if (command === "uninstall") uninstall(dshHome(), args);
 else if (command === "login") await login();
 else if (command === "--self-test") selfTest();
 else {
-  console.log("用法：dsh-llm-workbuddy <install|login|uninstall>");
+  console.log("用法：dsh-workbuddy <install|login|uninstall> [--profile desktop|web|headless]");
   process.exitCode = 1;
 }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
-import { __testing } from "./index.js";
+import { __testing, apply } from "./index.js";
 import {
   workBuddyApiKeyEntries,
   activeWorkBuddySession,
@@ -30,27 +30,50 @@ test("客户端兼容包装 Provider 并将 WorkBuddy 用量并入统计行", ()
   assert.match(client, /display: grid !important/);
 });
 
-test("忽略由其他插件负责的 Provider", () => {
-  const builtins = new Map([["deepseek", {}]]);
-
-  assert.equal(__testing.ownsProvider("workbuddy-cn", builtins), true);
-  assert.equal(__testing.ownsProvider("codebuddy-cn", builtins), true);
-  assert.equal(__testing.ownsProvider("deepseek", builtins), true);
-  assert.equal(__testing.ownsProvider("opencode-go-live", builtins), false);
+test("插件使用独立命名空间且不禁用原生 pi-ai Adapter", () => {
+  const patch = readFileSync(new URL("./cordis.patch.yml", import.meta.url), "utf8");
+  assert.equal(__testing.provider, "workbuddy-cn");
+  assert.equal(__testing.settingsNamespace, "llm-workbuddy");
+  assert.doesNotMatch(patch, /id:\s*llm-pi-ai/);
+  assert.doesNotMatch(patch, /disabled:\s*true/);
+  assert.match(patch, /@l77948032-cyber\/dsh-workbuddy/);
 });
 
-test("完整的自定义 Provider 配置由插件注册为通用路由", () => {
-  const provider = __testing.genericProvider("txcodingplan", {
-    displayName: "Deepseek-v4-flash",
-    api: "openai-completions",
-    baseURL: "https://chatapi.weixin.qq.com/openai/v1",
-    models: [{ id: "Deepseek-v4-flash", name: "Deepseek-v4-flash", maxTokens: 48000 }],
+test("运行时只注册 WorkBuddy，不接管已有自定义 Provider", () => {
+  const seen = { adapters: [], directories: [], discoveries: [] };
+  const replaceable = () => Object.assign(() => {}, { replace() {} });
+  const ctx = {
+    get: () => undefined,
+    inject: () => undefined,
+    llm: {
+      registerAdapter(providers) {
+        seen.adapters.push([...providers]);
+        return replaceable();
+      },
+      registerConfigurableProviders(entries) {
+        seen.directories.push(entries.map((entry) => ({ ...entry })));
+        return replaceable();
+      },
+      registerModelDiscovery(namespace) {
+        seen.discoveries.push(namespace);
+        return () => {};
+      },
+    },
+  };
+
+  apply(ctx, {
+    providers: {
+      b: {
+        api: "openai-completions",
+        baseURL: "https://api.b.ai/v1",
+        models: [{ id: "glm-5.3-flash" }],
+      },
+    },
   });
 
-  assert.equal(provider.id, "txcodingplan");
-  assert.equal(provider.getModels()[0].provider, "txcodingplan");
-  assert.equal(provider.getModels()[0].api, "openai-completions");
-  assert.equal(__testing.ownsProvider("txcodingplan", new Map(), { api: "openai-completions", baseURL: "https://example.com", models: [{ id: "model" }] }), true);
+  assert.deepEqual(seen.adapters, [["workbuddy-cn"]]);
+  assert.deepEqual(seen.directories.map((entries) => entries.map((entry) => entry.provider)), [["workbuddy-cn"]]);
+  assert.deepEqual(seen.discoveries, ["llm-workbuddy"]);
 });
 
 test("API Key 和登录令牌使用各自的认证头", () => {

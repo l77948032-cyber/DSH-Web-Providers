@@ -5,9 +5,6 @@ import { Config, PiAiAdapter } from "@deepseek-ai/dsh-llm-pi-ai";
 import * as dshSettings from "@deepseek-ai/dsh-settings";
 import { createProvider } from "@earendil-works/pi-ai";
 import * as openAICompletionsApi from "@earendil-works/pi-ai/api/openai-completions";
-import * as openAIResponsesApi from "@earendil-works/pi-ai/api/openai-responses";
-import * as anthropicMessagesApi from "@earendil-works/pi-ai/api/anthropic-messages";
-import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import {
   WORKBUDDY_SESSION_REF,
   WORKBUDDY_SESSIONS_REF,
@@ -31,7 +28,7 @@ export { Config };
 export const name = "llm-workbuddy";
 export const inject = ["llm"];
 
-const NS = typeof dshSettings.settingsNamespace === "function" ? dshSettings.settingsNamespace("llm-pi-ai") : "llm-pi-ai";
+const NS = typeof dshSettings.settingsNamespace === "function" ? dshSettings.settingsNamespace("llm-workbuddy") : "llm-workbuddy";
 const PROVIDER = "workbuddy-cn";
 const LEGACY_PROVIDER = "codebuddy-cn";
 const WORKBUDDY_PROVIDERS = new Set([PROVIDER, LEGACY_PROVIDER]);
@@ -234,59 +231,6 @@ function workBuddyProvider(models, provider = PROVIDER) {
   });
 }
 
-const GENERIC_APIS = Object.freeze({
-  "openai-completions": openAICompletionsApi,
-  "openai-responses": openAIResponsesApi,
-  "anthropic-messages": anthropicMessagesApi,
-});
-const GENERIC_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-
-function genericApiKeyAuth(provider) {
-  return {
-    name: `${provider} API Key`,
-    resolve: async ({ credential, signal } = {}) => {
-      signal?.throwIfAborted?.();
-      if (!credential?.key) return undefined;
-      return { auth: { apiKey: credential.key }, source: "DSH credential" };
-    },
-  };
-}
-
-function genericModel(provider, source, entry) {
-  const reasoningEfforts = entry.reasoningEfforts;
-  const reasoning = reasoningEfforts !== false && reasoningEfforts && typeof reasoningEfforts === "object";
-  const thinkingLevelMap = reasoning
-    ? Object.fromEntries(GENERIC_LEVELS.filter((level) => Object.hasOwn(reasoningEfforts, level)).map((level) => [level, reasoningEfforts[level]]))
-    : undefined;
-  return {
-    id: entry.id,
-    name: entry.name ?? entry.id,
-    api: source.api,
-    provider,
-    baseUrl: source.baseURL,
-    input: Array.isArray(entry.input) && entry.input.length > 0 ? [...entry.input] : [...source.defaultInput ?? ["text"]],
-    cost: { ...NO_COST },
-    contextWindow: entry.contextWindow ?? source.defaultContextWindow ?? 262144,
-    maxTokens: entry.maxTokens ?? source.defaultMaxTokens ?? 32768,
-    ...(reasoning ? { reasoning: true, thinkingLevelMap } : {}),
-    ...(entry.compat ?? source.compat ? { compat: { ...(source.compat ?? {}), ...(entry.compat ?? {}) } } : {}),
-  };
-}
-
-function genericProvider(provider, source = {}) {
-  const api = GENERIC_APIS[source.api];
-  if (!api || !source.baseURL || !Array.isArray(source.models) || source.models.length === 0) return undefined;
-  return createProvider({
-    id: provider,
-    name: source.displayName ?? provider,
-    baseUrl: source.baseURL,
-    headers: source.headers,
-    auth: { apiKey: genericApiKeyAuth(provider) },
-    models: source.models.map((entry) => genericModel(provider, source, entry)),
-    api,
-  });
-}
-
 function resolvedProfile(provider, source, piProvider, configuredMaxTokens = new Map()) {
   const apiKeyEnv = source.apiKeyEnv === undefined ? undefined : credentialRef(source.apiKeyEnv);
   return {
@@ -306,23 +250,6 @@ function resolvedProfile(provider, source, piProvider, configuredMaxTokens = new
   };
 }
 
-function selectBuiltinModels(base, entries) {
-  if (!Array.isArray(entries) || entries.length === 0) return base;
-  const byId = new Map(base.getModels().map((model) => [model.id, model]));
-  const selected = entries.flatMap((entry) => {
-    const model = byId.get(entry.id);
-    if (!model) return [];
-    return [{
-      ...model,
-      ...(entry.name ? { name: entry.name } : {}),
-      ...(entry.contextWindow ? { contextWindow: entry.contextWindow } : {}),
-      ...(entry.maxTokens ? { maxTokens: entry.maxTokens } : {}),
-      ...(Array.isArray(entry.input) && entry.input.length ? { input: [...entry.input] } : {}),
-    }];
-  });
-  return { ...base, getModels: () => selected };
-}
-
 function selectWorkBuddyModels(base, entries) {
   if (!Array.isArray(entries) || entries.length === 0) return base;
   const byId = new Map(base.map((model) => [model.id, model]));
@@ -338,10 +265,6 @@ function selectWorkBuddyModels(base, entries) {
       ...reasoning,
     });
   });
-}
-
-function ownsProvider(provider, builtins, source) {
-  return WORKBUDDY_PROVIDERS.has(provider) || builtins.has(provider) || genericProvider(provider, source) !== undefined;
 }
 
 function runtimeHeaders(headers) {
@@ -367,7 +290,17 @@ function installSettingsCompat(ctx, ns, schema, entry, hooks) {
   });
 }
 
-export const __testing = Object.freeze({ authenticationHeaders, workBuddyApiKeyAuth, workBuddyRequestOptions, workBuddySource, genericProvider, modelsFromConfig, ownsProvider, runtimeHeaders, selectWorkBuddyModels });
+export const __testing = Object.freeze({
+  authenticationHeaders,
+  workBuddyApiKeyAuth,
+  workBuddyRequestOptions,
+  workBuddySource,
+  modelsFromConfig,
+  runtimeHeaders,
+  selectWorkBuddyModels,
+  provider: PROVIDER,
+  settingsNamespace: NS,
+});
 
 export function apply(ctx, config) {
   installWorkBuddyWeb(ctx);
@@ -379,7 +312,6 @@ export function apply(ctx, config) {
   let memoized;
   let loginSessionPromise;
   let remoteModelsKey;
-  const builtins = new Map(builtinProviders().map((provider) => [provider.id, provider]));
 
   const effectiveConfig = () => {
     const raw = current() ?? {};
@@ -398,36 +330,16 @@ export function apply(ctx, config) {
     const raw = effectiveConfig();
     if (memoRaw === current() && memoGeneration === generation && memoized) return memoized;
     const result = new Map();
-    for (const [provider, source] of Object.entries(raw.providers)) {
-      if (!ownsProvider(provider, builtins, source)) continue;
-      if (WORKBUDDY_PROVIDERS.has(provider)) {
-        const sourceWithAuth = workBuddySource(current(), source);
-        const models = selectWorkBuddyModels(remoteModels ?? FALLBACK_MODELS, source.models);
-        const configured = new Map((source.models ?? []).flatMap((model) =>
-          Number.isSafeInteger(model.maxTokens) && model.maxTokens > 0 ? [[model.id, model.maxTokens]] : [],
-        ));
-        result.set(provider, resolvedProfile(provider, {
-          ...sourceWithAuth,
-          displayName: DISPLAY_NAME,
-        }, workBuddyProvider(models, provider), configured));
-        continue;
-      }
-      const base = builtins.get(provider);
-      if (!base) {
-        const generic = genericProvider(provider, source);
-        if (!generic) continue;
-        const configured = new Map((source.models ?? []).flatMap((model) =>
-          Number.isSafeInteger(model.maxTokens) && model.maxTokens > 0 ? [[model.id, model.maxTokens]] : [],
-        ));
-        result.set(provider, resolvedProfile(provider, source, generic, configured));
-        continue;
-      }
-      const selected = selectBuiltinModels(base, source.models);
-      const configured = new Map((source.models ?? []).flatMap((model) =>
-        Number.isSafeInteger(model.maxTokens) && model.maxTokens > 0 ? [[model.id, model.maxTokens]] : [],
-      ));
-      result.set(provider, resolvedProfile(provider, source, selected, configured));
-    }
+    const source = raw.providers[PROVIDER];
+    const sourceWithAuth = workBuddySource(current(), source);
+    const models = selectWorkBuddyModels(remoteModels ?? FALLBACK_MODELS, source.models);
+    const configured = new Map((source.models ?? []).flatMap((model) =>
+      Number.isSafeInteger(model.maxTokens) && model.maxTokens > 0 ? [[model.id, model.maxTokens]] : [],
+    ));
+    result.set(PROVIDER, resolvedProfile(PROVIDER, {
+      ...sourceWithAuth,
+      displayName: DISPLAY_NAME,
+    }, workBuddyProvider(models), configured));
     memoRaw = current();
     memoGeneration = generation;
     memoized = result;
@@ -484,7 +396,7 @@ export function apply(ctx, config) {
       try {
         session = await resolveLoginSession();
       } catch (error) {
-        throw new LlmError(`${name}: 未找到可用的 WorkBuddy 登录令牌，请运行 dsh-llm-workbuddy login`, "MISSING_CREDENTIAL", { cause: error });
+        throw new LlmError(`${name}: 未找到可用的 WorkBuddy 登录令牌，请在模型设置中登录 WorkBuddy`, "MISSING_CREDENTIAL", { cause: error });
       }
       profile.headers ??= {};
       if (session.account.userId) profile.headers["X-User-Id"] = session.account.userId;
@@ -553,45 +465,23 @@ export function apply(ctx, config) {
     settingsNs: NS,
     settingsPath: ["providers", PROVIDER],
     declared: false,
-  }, ...[...builtins.values()].flatMap((provider) => provider.auth?.apiKey ? [{
-    provider: provider.id,
-    displayName: provider.name,
-    settingsNs: NS,
-    settingsPath: ["providers", provider.id],
-    declared: false,
-  }] : []), ...Object.entries(effectiveConfig().providers ?? {}).flatMap(([provider, source]) => {
-    if (WORKBUDDY_PROVIDERS.has(provider) || builtins.has(provider) || !genericProvider(provider, source)) return [];
-    return [{
-      provider,
-      displayName: source.displayName ?? provider,
-      settingsNs: NS,
-      settingsPath: ["providers", provider],
-      declared: true,
-    }];
-  })];
+  }];
 
   let directory = ctx.llm.registerConfigurableProviders(directoryEntries());
-  let registration = ctx.llm.registerAdapter([...profiles().keys()], adapter);
+  let registration = ctx.llm.registerAdapter([PROVIDER], adapter);
 
-  ctx.llm.registerModelDiscovery(NS, async (request) => {
-    if (WORKBUDDY_PROVIDERS.has(request.provider)) {
-      const profile = profiles().get(request.provider);
-      const credential = request.apiKey
-        ? { value: request.apiKey, kind: "api-key", ref: API_KEY_ENV }
-        : await resolveCredential(request.provider, profile);
-      remoteModels = await fetchWorkBuddyModels(credential, request.signal);
-      remoteModelsKey = credential.kind === "bearer" ? `token:${credential.sessionId ?? "active"}` : `api:${credential.ref ?? API_KEY_ENV}`;
-      generation += 1;
-      return remoteModels.map((model) => ({
-        id: model.id,
-        name: model.name,
-        contextWindow: model.contextWindow,
-        maxTokens: model.maxTokens,
-      }));
+  ctx.llm.registerModelDiscovery(NS, async (request, signal) => {
+    if (request.provider !== PROVIDER) {
+      throw new LlmError(`没有 Provider "${request.provider ?? ""}" 的模型目录`, "DISCOVERY_FAILED");
     }
-    const provider = builtins.get(request.provider);
-    if (!provider) throw new LlmError(`没有 Provider "${request.provider ?? ""}" 的模型目录`, "DISCOVERY_FAILED");
-    return provider.getModels().map((model) => ({
+    const profile = profiles().get(PROVIDER);
+    const credential = request.apiKey
+      ? { value: request.apiKey, kind: "api-key", ref: API_KEY_ENV }
+      : await resolveCredential(PROVIDER, profile);
+    remoteModels = await fetchWorkBuddyModels(credential, signal);
+    remoteModelsKey = credential.kind === "bearer" ? `token:${credential.sessionId ?? "active"}` : `api:${credential.ref ?? API_KEY_ENV}`;
+    generation += 1;
+    return remoteModels.map((model) => ({
       id: model.id,
       name: model.name,
       contextWindow: model.contextWindow,
@@ -608,8 +498,8 @@ export function apply(ctx, config) {
     },
     onChange() {
       memoRaw = undefined;
-      const providers = profiles();
-      registration.replace([...providers.keys()]);
+      profiles();
+      registration.replace([PROVIDER]);
       directory.replace(directoryEntries());
     },
   });

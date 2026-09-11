@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-  id: "@axiaohungry/dsh-llm-workbuddy",
+  id: "@l77948032-cyber/dsh-workbuddy",
   factory: (require) => {
     const ROUTE = "/dsh-llm-workbuddy/auth";
     const MARKER = "data-workbuddy-auth-switch";
@@ -309,7 +309,7 @@ window.__ModuleLoader__.load({
     function installComposerDockLayout() {
       if (typeof document === "undefined" || document.querySelector('style[data-plugin-css="dsh-llm-workbuddy-composer-dock"]')) return;
       const style = document.createElement("style");
-      style.dataset.plugin = "@axiaohungry/dsh-llm-workbuddy";
+      style.dataset.plugin = "@l77948032-cyber/dsh-workbuddy";
       style.dataset.pluginCss = "dsh-llm-workbuddy-composer-dock";
       style.textContent = `
 [data-slot="conversation.composer.dock"]:has(> [data-composer-stats]),
