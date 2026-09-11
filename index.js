@@ -22,6 +22,7 @@ import {
   upsertWorkBuddySession,
 } from "./workbuddy-auth.js";
 import { installWorkBuddyWeb } from "./workbuddy-web.js";
+import { modelMetadataFromConfig, selectWorkBuddyModelRecords } from "./workbuddy-models.js";
 
 export { Config };
 
@@ -139,14 +140,8 @@ function text(...values) {
 }
 
 function modelsFromConfig(data) {
-  const agents = Array.isArray(data?.agents) ? data.agents : data?.agent?.agents;
-  const cli = Array.isArray(agents) ? agents.find((agent) => agent?.name === "cli") : undefined;
-  const allowed = Array.isArray(cli?.models) ? cli.models : [];
-  const source = Array.isArray(data?.models) ? data.models : [];
-  const byId = new Map(source.map((model) => [model?.id, model]));
-  return allowed.flatMap((id) => {
-    const raw = byId.get(id);
-    if (!raw) return [];
+  return selectWorkBuddyModelRecords(data).flatMap((raw) => {
+    const id = raw.id;
     const fallback = FALLBACK_MODELS.find((model) => model.id === id);
     const contextWindow = positiveInteger(raw.maxInputTokens, raw.maxAllowedSize, fallback?.contextWindow);
     const maxTokens = positiveInteger(raw.maxOutputTokens, fallback?.maxTokens);
@@ -168,6 +163,13 @@ function authenticationHeaders(credential) {
 }
 
 async function fetchWorkBuddyModels(credential, signal) {
+  const data = await fetchWorkBuddyConfiguration(credential, signal);
+  const models = modelsFromConfig(data);
+  if (models.length === 0) throw new LlmError("WorkBuddy 没有返回 CLI 可用模型", "DISCOVERY_FAILED");
+  return models;
+}
+
+async function fetchWorkBuddyConfiguration(credential, signal) {
   let response;
   try {
     response = await fetch(CONFIG_URL, {
@@ -186,9 +188,11 @@ async function fetchWorkBuddyModels(credential, signal) {
   if (!response.ok) throw new LlmError(`WorkBuddy 模型配置接口返回 ${response.status}`, "DISCOVERY_FAILED");
   const body = await response.json();
   if (body?.code !== 0) throw new LlmError(`WorkBuddy 模型配置接口错误：${body?.msg ?? body?.code}`, "DISCOVERY_FAILED");
-  const models = modelsFromConfig(body.data);
-  if (models.length === 0) throw new LlmError("WorkBuddy 没有返回 CLI 可用模型", "DISCOVERY_FAILED");
-  return models;
+  return body.data;
+}
+
+async function fetchWorkBuddyModelCatalog(credential, signal) {
+  return modelMetadataFromConfig(await fetchWorkBuddyConfiguration(credential, signal));
 }
 
 /**
@@ -235,6 +239,9 @@ function resolvedProfile(provider, source, piProvider, configuredMaxTokens = new
   const apiKeyEnv = source.apiKeyEnv === undefined ? undefined : credentialRef(source.apiKeyEnv);
   return {
     ...source,
+    // WorkBuddy chooses each model's reasoning policy. Do not let a DSH route
+    // setting turn that fixed provider behavior into a user-selectable override.
+    reasoning: undefined,
     headers: runtimeHeaders(source.headers),
     provider,
     displayName: source.displayName ?? piProvider.name ?? provider,
@@ -248,6 +255,12 @@ function resolvedProfile(provider, source, piProvider, configuredMaxTokens = new
     configuredMaxTokens,
     piProvider,
   };
+}
+
+function withoutReasoningControl(modelInfo) {
+  if (!modelInfo?.reasoning) return modelInfo;
+  const { reasoning: _reasoning, ...fixed } = modelInfo;
+  return fixed;
 }
 
 function selectWorkBuddyModels(base, entries) {
@@ -296,6 +309,8 @@ export const __testing = Object.freeze({
   workBuddyRequestOptions,
   workBuddySource,
   modelsFromConfig,
+  modelMetadataFromConfig,
+  withoutReasoningControl,
   runtimeHeaders,
   selectWorkBuddyModels,
   provider: PROVIDER,
@@ -303,7 +318,7 @@ export const __testing = Object.freeze({
 });
 
 export function apply(ctx, config) {
-  installWorkBuddyWeb(ctx);
+  installWorkBuddyWeb(ctx, { fetchModelCatalog: fetchWorkBuddyModelCatalog });
   let current = () => config;
   let remoteModels;
   let generation = 0;
@@ -429,11 +444,14 @@ export function apply(ctx, config) {
   const resolveModel = adapter.resolveModel.bind(adapter);
   adapter.resolveModel = async (provider, model, signal) => {
     const resolved = await resolveModel(provider, model, signal);
-    if (!WORKBUDDY_PROVIDERS.has(provider) || !resolved.reasoning) return resolved;
-    const configured = profiles().get(provider)?.piProvider.getModels().find((entry) => entry.id === model);
-    const effort = configured?.defaultReasoningEffort;
-    if (!effort || !resolved.reasoning.efforts.some((entry) => entry.id === effort)) return resolved;
-    return { ...resolved, reasoning: { ...resolved.reasoning, defaultEffort: effort } };
+    return WORKBUDDY_PROVIDERS.has(provider) ? withoutReasoningControl(resolved) : resolved;
+  };
+  const prepareCall = adapter.prepareCall.bind(adapter);
+  adapter.prepareCall = async (provider, model, signal) => {
+    const prepared = await prepareCall(provider, model, signal);
+    return WORKBUDDY_PROVIDERS.has(provider)
+      ? { ...prepared, model: withoutReasoningControl(prepared.model) }
+      : prepared;
   };
   const listModels = adapter.listModels.bind(adapter);
   let refreshPromise;

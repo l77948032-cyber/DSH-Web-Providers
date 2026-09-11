@@ -21,6 +21,7 @@ import {
 } from "./workbuddy-auth.js";
 import { authenticationMode } from "./workbuddy-web.js";
 import { __testing as creditsTesting, fetchWorkBuddyCredits } from "./workbuddy-credits.js";
+import { AUTO_TIER_MODELS, formatCreditsCoefficient, isPromotionActive, modelMetadataFromConfig } from "./workbuddy-models.js";
 
 test("客户端兼容包装 Provider 并将 WorkBuddy 用量并入统计行", () => {
   const client = readFileSync(new URL("./client.js", import.meta.url), "utf8");
@@ -30,6 +31,75 @@ test("客户端兼容包装 Provider 并将 WorkBuddy 用量并入统计行", ()
   assert.match(client, /display: grid !important/);
   assert.match(client, /settings\.models\.provider-card/);
   assert.match(client, /key: "llm-workbuddy"/);
+  assert.match(client, /authRequest\("models", \{\}\)/);
+  assert.match(client, /data-workbuddy-model-rate/);
+  assert.match(client, /\\p\{L\}\\p\{N\}/);
+  assert.match(client, /section\.querySelectorAll\('button, \[role="menuitemradio"\], \[role="menuitem"\]'\)/);
+  assert.match(client, /消耗速度/);
+  assert.doesNotMatch(client, /EFFORT_TRANSLATIONS/);
+  assert.match(client, /dsh-wb-stats/);
+});
+
+test("模型元数据按 WorkBuddy 规则展示倍率、活动和详情", () => {
+  const now = new Date("2026-09-11T09:00:00+08:00");
+  const model = modelMetadataFromConfig({
+    agents: [{ name: "cli", models: ["hy4", "hy4"] }],
+    models: [{
+      id: "hy4",
+      name: "Hy4 preview",
+      descriptionZh: "混元思考模型，具有增强的推理能力",
+      credits: "x0.50 credits",
+      maxInputTokens: 300_000,
+      supportsReasoning: true,
+      reasoning: { effort: "high" },
+    }],
+    modelPromotions: [{
+      id: "hy4-free",
+      modelIds: ["hy4"],
+      kind: "discount",
+      badge: { label: "限时免费", display: "activeOnly" },
+      discount: { factor: 0, discountedCredits: "0x", displayMode: "replace" },
+      hover: { textZh: "限时启用可享免费额度。", action: { labelZh: "去使用" } },
+      schedule: { validFrom: "2026-09-01T00:00:00+08:00", validUntil: "2026-10-01T00:00:00+08:00" },
+    }],
+  }, now).find((entry) => entry.id === "hy4");
+
+  assert.equal(model.rate, "0.00x");
+  assert.equal(model.badge, "限时免费");
+  assert.equal(model.description, "混元思考模型，具有增强的推理能力");
+  assert.equal(model.contextWindow, 300_000);
+  assert.equal(model.reasoningEffort, "高");
+  assert.equal(model.promotionAction, "去使用");
+  assert.equal(formatCreditsCoefficient("x0.79 credits"), "0.79x");
+  assert.equal(isPromotionActive({ schedule: { daily: [{ start: "22:00", end: "06:00" }] } }, new Date("2026-09-11T23:00:00")), true);
+});
+
+test("Auto 模型按 WorkBuddy 展开为快速、均衡、极致并去重", () => {
+  const models = modelMetadataFromConfig({
+    agents: [{ name: "cli", models: ["auto", "hy3", "hy3"] }],
+    models: [
+      { id: "auto", name: "Auto", maxInputTokens: 168_000, maxOutputTokens: 32_000 },
+      { id: "hy3", name: "Hy3", maxInputTokens: 192_000, maxOutputTokens: 64_000 },
+    ],
+  });
+
+  assert.deepEqual(models.slice(0, 3).map((model) => model.id), AUTO_TIER_MODELS.map((model) => model.id));
+  assert.deepEqual(models.slice(0, 3).map((model) => model.rate), ["0.21x", "0.65x", "1.20x"]);
+  assert.equal(models.filter((model) => model.id === "hy3").length, 1);
+  assert.equal(models.some((model) => model.id === "auto"), false);
+});
+
+test("远端只下发折后倍率时保留 WorkBuddy 当前活动标识", () => {
+  const models = modelMetadataFromConfig({
+    agents: [{ name: "cli", models: ["hy4-preview-f", "hy3", "deepseek-v4.1-flash", "glm-5.2"] }],
+    models: [
+      { id: "hy4-preview-f", name: "Hy4 preview", credits: "x0.00 credits", maxInputTokens: 300_000 },
+      { id: "hy3", name: "Hy3", credits: "x0.00 credits", maxInputTokens: 192_000 },
+      { id: "deepseek-v4.1-flash", name: "Deepseek-V4.1-Flash", credits: "x0.03 credits", maxInputTokens: 1_000_000 },
+      { id: "glm-5.2", name: "GLM-5.2", credits: "x0.79 credits", maxInputTokens: 1_000_000 },
+    ],
+  }, new Date("2026-09-11T18:00:00+08:00"));
+  assert.deepEqual(models.slice(3).map((model) => model.badge), ["限时免费", "限时免费", "独家优惠", "夜间折扣"]);
 });
 
 test("插件使用独立命名空间且不禁用原生 pi-ai Adapter", () => {
@@ -231,12 +301,22 @@ test("模型目录保留逐模型思考能力和默认档位", () => {
     ],
   });
 
-  assert.deepEqual(models.map((model) => model.id), ["reasoning", "plain"]);
-  assert.equal(models[0].reasoning, true);
-  assert.equal(models[0].thinkingLevelMap.off, null);
-  assert.equal(models[0].thinkingLevelMap.xhigh, undefined);
-  assert.equal(models[0].defaultReasoningEffort, "high");
-  assert.equal(models[1].reasoning, false);
+  const configured = models.filter((model) => model.id === "reasoning" || model.id === "plain");
+  assert.deepEqual(configured.map((model) => model.id), ["reasoning", "plain"]);
+  assert.equal(configured[0].reasoning, true);
+  assert.equal(configured[0].thinkingLevelMap.off, null);
+  assert.equal(configured[0].thinkingLevelMap.xhigh, undefined);
+  assert.equal(configured[0].defaultReasoningEffort, "high");
+  assert.equal(configured[1].reasoning, false);
+});
+
+test("WorkBuddy 固定模型推理策略，不向 DSH 暴露可选档位", () => {
+  const info = __testing.withoutReasoningControl({
+    provider: "workbuddy-cn",
+    id: "hy4",
+    reasoning: { efforts: [{ id: "high", name: "High" }], defaultEffort: "high" },
+  });
+  assert.deepEqual(info, { provider: "workbuddy-cn", id: "hy4" });
 });
 
 test("自定义模型可覆盖自己的思考档位", () => {

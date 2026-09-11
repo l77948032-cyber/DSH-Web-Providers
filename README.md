@@ -30,8 +30,10 @@ Provider 同时出现在模型选择器中。
 - 多 API Key、多登录账号和账号切换；
 - 自动刷新网页登录令牌；
 - 在线获取当前账号可用模型，失败时使用内置目录；
-- 按模型提供上下文窗口、图片输入与思考档位；
-- 令牌模式显示剩余积分和今日用量；
+- 在 DSH 模型菜单中显示 WorkBuddy 当前倍率、活动徽标、活动说明、上下文窗口与思考强度；
+- 与 WorkBuddy 一致地展开 Auto 为“快速 / 均衡 / 极致”三档；
+- 按模型提供上下文窗口与图片输入，推理策略遵循 WorkBuddy 的模型默认值；
+- 令牌模式在设置页显示剩余积分和今日用量，会话底部只显示剩余积分；
 - DSH 继续负责 Agent 循环、工具调用、会话、权限和系统提示词。
 
 ## 环境要求
@@ -47,13 +49,13 @@ Provider 同时出现在模型选择器中。
 ### 普通 DSH Web
 
 ```sh
-dsh plugin --profile web add github:l77948032-cyber/DSH-Workbuddy#v1.0.1
+dsh plugin --profile web add github:l77948032-cyber/DSH-Workbuddy#v1.1.0
 ```
 
 如果同时使用 headless Profile，需要分别安装：
 
 ```sh
-dsh plugin --profile headless add github:l77948032-cyber/DSH-Workbuddy#v1.0.1
+dsh plugin --profile headless add github:l77948032-cyber/DSH-Workbuddy#v1.1.0
 ```
 
 安装后重启 DSH。不要同时启用上游包 `@axiaohungry/dsh-llm-workbuddy`，两个包使用相同的
@@ -64,7 +66,7 @@ Cordis 插件 ID。
 先完全退出 DSH Desktop，再运行：
 
 ```sh
-npx --yes --package=github:l77948032-cyber/DSH-Workbuddy#v1.0.1 \
+npx --yes --package=github:l77948032-cyber/DSH-Workbuddy#v1.1.0 \
   dsh-workbuddy install --profile desktop
 ```
 
@@ -74,7 +76,7 @@ npx --yes --package=github:l77948032-cyber/DSH-Workbuddy#v1.0.1 \
 卸载方式：
 
 ```sh
-npx --yes --package=github:l77948032-cyber/DSH-Workbuddy#v1.0.1 \
+npx --yes --package=github:l77948032-cyber/DSH-Workbuddy#v1.1.0 \
   dsh-workbuddy uninstall --profile desktop
 ```
 
@@ -88,7 +90,7 @@ npx --yes --package=github:l77948032-cyber/DSH-Workbuddy#v1.0.1 \
 
 ### 网页登录
 
-1. 选择 `令牌登录`；
+1. 选择 `网页登录`；
 2. 点击“登录 WorkBuddy”；
 3. 在打开的浏览器页面完成登录；
 4. 返回 DSH，选择需要使用的账号。
@@ -106,8 +108,12 @@ Key 的值只进入 DSH 凭据服务，设置文件仅保存凭据引用。
 ## 模型目录
 
 在 WorkBuddy Provider 设置中点击“获取可用模型”。插件会用当前凭据请求 WorkBuddy 模型
-目录，并允许选择和调整模型名称、上下文窗口、最大输出 Token 与思考档位。更换账号或 Key
-后建议重新获取一次。
+目录，并允许选择和调整模型名称、上下文窗口与最大输出 Token。与 WorkBuddy 原生行为一致，
+思考强度只展示模型配置，不在 DSH 中提供手动档位覆盖。更换账号或 Key 后建议重新获取一次。
+
+在会话底部打开模型菜单时，插件会读取腾讯当前模型目录中的计费倍率。限时免费、独家优惠、
+夜间折扣等 WorkBuddy 当前活动标识会显示在对应模型行；悬停或聚焦模型时可查看消耗速度、
+思考强度、上下文窗口和活动说明。服务端下发活动规则时，插件按其有效期和时段动态计算。
 
 ## 请求边界
 

@@ -233,7 +233,23 @@ async function resolveSession(webCtx, accountId) {
   return session;
 }
 
-export function installWorkBuddyWeb(ctx) {
+async function resolveModelCredential(webCtx, accountId) {
+  if (authenticationMode(webCtx.settings.get(SETTINGS_NS)) === "token") {
+    const session = await resolveSession(webCtx, accountId);
+    return { value: session.auth.accessToken, kind: "bearer", sessionId: session.id };
+  }
+  const configuredRef = configuredApiKeyRef(webCtx.settings);
+  let ref = configuredRef;
+  let resolved = await webCtx.credentials.resolve(credentialRef(ref));
+  if (!resolved?.value && ref === API_KEY_ENV) {
+    ref = LEGACY_API_KEY_ENV;
+    resolved = await webCtx.credentials.resolve(credentialRef(ref));
+  }
+  if (!resolved?.value) throw new Error("没有找到可用的 WorkBuddy API Key");
+  return { value: resolved.value, kind: "api-key", ref };
+}
+
+export function installWorkBuddyWeb(ctx, { fetchModelCatalog } = {}) {
   ctx.inject(["webServer", "settings", "credentials"], (webCtx) => {
     let loginPromise;
     const currentState = async () => {
@@ -401,6 +417,19 @@ export function installWorkBuddyWeb(ctx) {
         });
       }
     };
+    const models = async (req, res) => {
+      if (req.method !== "POST") return json(res, 405, { ok: false, message: "Method not allowed" });
+      if (!localPost(req)) return json(res, 403, { ok: false, message: "只允许从本机 DSH 页面查询 WorkBuddy 模型信息" });
+      if (typeof fetchModelCatalog !== "function") return json(res, 501, { ok: false, message: "WorkBuddy 模型信息服务不可用" });
+      try {
+        const body = await requestBody(req);
+        const credential = await resolveModelCredential(webCtx, body.accountId);
+        const catalog = await fetchModelCatalog(credential);
+        json(res, 200, { ok: true, models: catalog });
+      } catch (error) {
+        json(res, 500, { ok: false, message: error instanceof Error ? error.message : "查询 WorkBuddy 模型信息失败" });
+      }
+    };
     const login = async (req, res) => {
       if (req.method !== "POST") return json(res, 405, { ok: false, message: "Method not allowed" });
       if (!localPost(req)) return json(res, 403, { ok: false, message: "只允许从本机 DSH 页面登录" });
@@ -443,6 +472,7 @@ export function installWorkBuddyWeb(ctx) {
         webCtx.webServer.register({ kind: "exact", path: `${ROUTE}/api-key/remove`, handler: removeApiKey }),
         webCtx.webServer.register({ kind: "exact", path: `${ROUTE}/token`, handler: token }),
         webCtx.webServer.register({ kind: "exact", path: `${ROUTE}/credits`, handler: credits }),
+        webCtx.webServer.register({ kind: "exact", path: `${ROUTE}/models`, handler: models }),
         webCtx.webServer.register({ kind: "exact", path: `${ROUTE}/login`, handler: login }),
         webCtx.webServer.register({ kind: "exact", path: `${ROUTE}/remove`, handler: remove }),
       ];

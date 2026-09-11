@@ -1,6 +1,6 @@
 {
   "name": "@l77948032-cyber/dsh-workbuddy",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "以独立 Provider 为 DeepSeek Harness 接入 WorkBuddy API Key 或网页登录令牌",
   "author": "l77948032-cyber; based on Axiaohungry/dsh-llm-workbuddy",
   "keywords": [
@@ -32,6 +32,7 @@
     "index.js",
     "workbuddy-auth.js",
     "workbuddy-credits.js",
+    "workbuddy-models.js",
     "workbuddy-web.js",
     "client.js",
     "cli.js",
@@ -41,7 +42,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "check": "node --check index.js && node --check workbuddy-auth.js && node --check workbuddy-credits.js && node --check workbuddy-web.js && node --check client.js && node --check cli.js && node --test test.js && node cli.js --self-test"
+    "check": "node --check index.js && node --check workbuddy-auth.js && node --check workbuddy-credits.js && node --check workbuddy-models.js && node --check workbuddy-web.js && node --check client.js && node --check cli.js && node --test test.js && node cli.js --self-test"
   },
   "dsh": {
     "engines": {
