@@ -47,13 +47,13 @@ Provider 同时出现在模型选择器中。
 ### 普通 DSH Web
 
 ```sh
-dsh plugin --profile web add github:l77948032-cyber/DSH-Workbuddy#v1.0.0
+dsh plugin --profile web add github:l77948032-cyber/DSH-Workbuddy#v1.0.1
 ```
 
 如果同时使用 headless Profile，需要分别安装：
 
 ```sh
-dsh plugin --profile headless add github:l77948032-cyber/DSH-Workbuddy#v1.0.0
+dsh plugin --profile headless add github:l77948032-cyber/DSH-Workbuddy#v1.0.1
 ```
 
 安装后重启 DSH。不要同时启用上游包 `@axiaohungry/dsh-llm-workbuddy`，两个包使用相同的
@@ -64,7 +64,7 @@ Cordis 插件 ID。
 先完全退出 DSH Desktop，再运行：
 
 ```sh
-npx --yes --package=github:l77948032-cyber/DSH-Workbuddy#v1.0.0 \
+npx --yes --package=github:l77948032-cyber/DSH-Workbuddy#v1.0.1 \
   dsh-workbuddy install --profile desktop
 ```
 
@@ -74,7 +74,7 @@ npx --yes --package=github:l77948032-cyber/DSH-Workbuddy#v1.0.0 \
 卸载方式：
 
 ```sh
-npx --yes --package=github:l77948032-cyber/DSH-Workbuddy#v1.0.0 \
+npx --yes --package=github:l77948032-cyber/DSH-Workbuddy#v1.0.1 \
   dsh-workbuddy uninstall --profile desktop
 ```
 

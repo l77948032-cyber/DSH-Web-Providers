@@ -6,7 +6,7 @@ window.__ModuleLoader__.load({
     const AUTH_STATE_EVENT = "dsh-llm-workbuddy:auth-state";
     const WORKBUDDY_PROVIDER_PATTERN = /(?:^|-)(?:work-?buddy|code-?buddy)(?:-|$)/;
     const React = require("react");
-    const { createElement, useEffect, useState } = React;
+    const { createElement, useEffect, useRef, useState } = React;
 
     function isWorkBuddyProvider(value) {
       const normalized = String(value ?? "")
@@ -735,6 +735,23 @@ window.__ModuleLoader__.load({
         });
     }
 
+    function WorkBuddyProviderCard({ provider }) {
+      const hostRef = useRef(null);
+      const supported = isWorkBuddyProvider(provider?.provider);
+      useEffect(() => {
+        const host = hostRef.current;
+        if (!supported || !host) return undefined;
+        const input = document.createElement("input");
+        input.type = "password";
+        input.hidden = true;
+        input.setAttribute("aria-label", "WorkBuddy 认证占位");
+        host.append(input);
+        mount(input);
+        return () => host.replaceChildren();
+      }, [supported, provider?.provider]);
+      return supported ? createElement("div", { ref: hostRef, "data-workbuddy-provider-card": "" }) : null;
+    }
+
     function enhance() {
       for (const input of document.querySelectorAll('input[aria-label="API 密钥"]')) {
         if (isWorkBuddy(input)) mount(input);
@@ -743,6 +760,10 @@ window.__ModuleLoader__.load({
 
     function apply(ctx) {
       installComposerDockLayout();
+      ctx.slots.inject("settings.models.provider-card", () => ctx.slots.register({
+        name: "settings.models.provider-card",
+        key: "llm-workbuddy",
+      }, WorkBuddyProviderCard));
       ctx.slots.inject("conversation.composer.dock", () => ctx.slots.register({
         name: "conversation.composer.dock",
         id: "workbuddy-credits",

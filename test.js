@@ -28,6 +28,8 @@ test("客户端兼容包装 Provider 并将 WorkBuddy 用量并入统计行", ()
   assert.match(client, /isWorkBuddyProvider\(provider\)/);
   assert.match(client, /data-composer-stats/);
   assert.match(client, /display: grid !important/);
+  assert.match(client, /settings\.models\.provider-card/);
+  assert.match(client, /key: "llm-workbuddy"/);
 });
 
 test("插件使用独立命名空间且不禁用原生 pi-ai Adapter", () => {
