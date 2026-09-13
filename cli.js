@@ -8,10 +8,6 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { parseDocument } from "yaml";
 import {
-  WORKBUDDY_SESSION_REF,
-  WORKBUDDY_SESSIONS_REF,
-  LEGACY_SESSION_REF,
-  LEGACY_SESSIONS_REF,
   createWorkBuddySessionStore,
   loginWorkBuddy,
   parseWorkBuddySession,
@@ -20,14 +16,15 @@ import {
   serializeWorkBuddySessions,
   upsertWorkBuddySession,
 } from "./workbuddy-auth.js";
+import { WORKBUDDY_CN, WORKBUDDY_REGIONS, workBuddyRegion } from "./workbuddy-regions.js";
 
 const PACKAGE = "@l77948032-cyber/dsh-workbuddy";
 const LEGACY_PACKAGES = ["@axiaohungry/dsh-llm-workbuddy", "dsh-llm-workbuddy", "dsh-llm-codebuddy"];
 const PACKAGE_VERSION = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version;
 const PACKAGE_SPEC = process.env.DSH_WORKBUDDY_PACKAGE_SPEC || `github:l77948032-cyber/DSH-Workbuddy#v${PACKAGE_VERSION}`;
 const SETTINGS_NS = "llm-workbuddy";
-const PROVIDER_PATH = [SETTINGS_NS, "providers", "workbuddy-cn"];
-const LEGACY_PROVIDER_PATH = [SETTINGS_NS, "providers", "codebuddy-cn"];
+const PROVIDER_PATH = [SETTINGS_NS, "providers", WORKBUDDY_CN.provider];
+const LEGACY_PROVIDER_PATH = [SETTINGS_NS, "providers", WORKBUDDY_CN.aliases[0]];
 const IGNORED_BUILDS = ["@google/genai", "protobufjs"];
 const PROFILES = new Set(["desktop", "web", "headless"]);
 const require = createRequire(import.meta.url);
@@ -116,6 +113,14 @@ function selectedProfiles(args = []) {
   return desktopDsh() ? ["desktop"] : ["web", "headless"];
 }
 
+function selectedRegion(args = []) {
+  if (args.length === 0) return WORKBUDDY_CN;
+  if (args.length !== 2 || args[0] !== "--region") throw new Error(`未知参数：${args.join(" ")}`);
+  const region = workBuddyRegion(args[1], null);
+  if (!region) throw new Error(`不支持的区域：${args[1]}`);
+  return region;
+}
+
 function writeYamlDocument(file, document, mode) {
   const existingMode = existsSync(file) ? statSync(file).mode & 0o777 : undefined;
   const targetMode = mode ?? existingMode ?? 0o600;
@@ -172,7 +177,9 @@ function cleanSettings(file) {
   const source = readFileSync(file, "utf8");
   const document = parseDocument(source);
   if (document.errors.length) throw new Error(`无法解析 ${file}：${document.errors[0].message}`);
-  const paths = [PROVIDER_PATH, LEGACY_PROVIDER_PATH].filter((path) => document.hasIn(path));
+  const paths = WORKBUDDY_REGIONS.flatMap((region) => [region.provider, ...region.aliases])
+    .map((provider) => [SETTINGS_NS, "providers", provider])
+    .filter((path) => document.hasIn(path));
   if (paths.length === 0) return undefined;
 
   for (const path of paths) document.deleteIn(path);
@@ -183,20 +190,23 @@ function cleanSettings(file) {
   return backup;
 }
 
-function enableTokenLogin(home = dshHome()) {
+function enableTokenLogin(home = dshHome(), regionValue = WORKBUDDY_CN) {
+  const region = workBuddyRegion(regionValue);
   const file = join(home, "settings.yaml");
   const source = existsSync(file) ? readFileSync(file, "utf8") : "{}\n";
   const document = parseDocument(source);
   if (document.errors.length) throw new Error(`无法解析 ${file}：${document.errors[0].message}`);
-  if (document.hasIn(PROVIDER_PATH)) document.deleteIn([...PROVIDER_PATH, "apiKeyEnv"]);
-  else if (document.hasIn(LEGACY_PROVIDER_PATH)) {
-    const legacy = document.getIn(LEGACY_PROVIDER_PATH);
+  const providerPath = [SETTINGS_NS, "providers", region.provider];
+  const legacyPath = region.aliases.map((provider) => [SETTINGS_NS, "providers", provider]).find((path) => document.hasIn(path));
+  if (document.hasIn(providerPath)) document.deleteIn([...providerPath, "apiKeyEnv"]);
+  else if (legacyPath) {
+    const legacy = document.getIn(legacyPath);
     const value = legacy && typeof legacy.toJSON === "function" ? legacy.toJSON() : legacy;
-    document.setIn(PROVIDER_PATH, document.createNode(value && typeof value === "object" ? value : {}));
-    document.deleteIn([...PROVIDER_PATH, "apiKeyEnv"]);
-    document.deleteIn(LEGACY_PROVIDER_PATH);
+    document.setIn(providerPath, document.createNode(value && typeof value === "object" ? value : {}));
+    document.deleteIn([...providerPath, "apiKeyEnv"]);
+    document.deleteIn(legacyPath);
   }
-  else document.setIn(PROVIDER_PATH, {});
+  else document.setIn(providerPath, {});
   if (existsSync(file)) {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     copyFileSync(file, `${file}.workbuddy-backup-${stamp}`);
@@ -204,20 +214,19 @@ function enableTokenLogin(home = dshHome()) {
   writeYamlDocument(file, document);
 }
 
-function storeLoginSession(session, home = dshHome()) {
+function storeLoginSession(session, home = dshHome(), regionValue = WORKBUDDY_CN) {
+  const region = workBuddyRegion(regionValue);
   const file = join(home, ".credentials.yaml");
   const document = parseDocument(existsSync(file) ? readFileSync(file, "utf8") : "{}\n");
   if (document.errors.length) throw new Error(`无法解析 ${file}：${document.errors[0].message}`);
-  const stored = document.get(WORKBUDDY_SESSIONS_REF)
-    ?? document.get(LEGACY_SESSIONS_REF)
-    ?? document.get(WORKBUDDY_SESSION_REF)
-    ?? document.get(LEGACY_SESSION_REF);
+  const stored = [region.sessionsRef, ...region.legacySessionsRefs, region.sessionRef, ...region.legacySessionRefs]
+    .map((ref) => document.get(ref))
+    .find((value) => value !== undefined);
   const current = stored ? parseWorkBuddySessions(stored) : createWorkBuddySessionStore();
   const next = upsertWorkBuddySession(current, session);
-  document.set(WORKBUDDY_SESSIONS_REF, serializeWorkBuddySessions(next));
-  document.set(WORKBUDDY_SESSION_REF, serializeWorkBuddySession(next.sessions.find((entry) => entry.id === next.activeId)));
-  document.delete(LEGACY_SESSIONS_REF);
-  document.delete(LEGACY_SESSION_REF);
+  document.set(region.sessionsRef, serializeWorkBuddySessions(next));
+  document.set(region.sessionRef, serializeWorkBuddySession(next.sessions.find((entry) => entry.id === next.activeId)));
+  for (const ref of [...region.legacySessionsRefs, ...region.legacySessionRefs]) document.delete(ref);
   if (existsSync(file)) {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const backup = `${file}.workbuddy-backup-${stamp}`;
@@ -227,15 +236,16 @@ function storeLoginSession(session, home = dshHome()) {
   writeYamlDocument(file, document, 0o600);
 }
 
-async function login() {
-  console.log("正在打开 WorkBuddy 中国站网页登录（无需安装 WorkBuddy CLI）……");
+async function login(args = []) {
+  const region = selectedRegion(args);
+  console.log(`正在打开${region.siteName}网页登录（无需安装 WorkBuddy CLI）……`);
   const session = await loginWorkBuddy((url, opened) => {
     if (opened) console.log("浏览器登录页已打开，请在浏览器中完成登录。");
     else console.log(`无法自动打开浏览器，请手动访问：${url}`);
-  });
-  storeLoginSession(session);
-  enableTokenLogin();
-  console.log("WorkBuddy 令牌登录成功，Provider 已切换为令牌模式。请重启 DSH。");
+  }, undefined, region);
+  storeLoginSession(session, dshHome(), region);
+  enableTokenLogin(dshHome(), region);
+  console.log(`${region.displayName}令牌登录成功，Provider 已切换为令牌模式。请重启 DSH。`);
 }
 
 function install(args) {
@@ -296,11 +306,11 @@ function selfTest() {
       account: { userId: "test-user" },
     };
     storeLoginSession(sampleSession, root);
-    const storedSession = parseDocument(readFileSync(join(root, ".credentials.yaml"), "utf8")).get(WORKBUDDY_SESSION_REF);
+    const storedSession = parseDocument(readFileSync(join(root, ".credentials.yaml"), "utf8")).get(WORKBUDDY_CN.sessionRef);
     if (parseWorkBuddySession(storedSession).account.userId !== "test-user") {
       throw new Error("token credential storage self-test failed");
     }
-    const storedSessions = parseDocument(readFileSync(join(root, ".credentials.yaml"), "utf8")).get(WORKBUDDY_SESSIONS_REF);
+    const storedSessions = parseDocument(readFileSync(join(root, ".credentials.yaml"), "utf8")).get(WORKBUDDY_CN.sessionsRef);
     const sessionStore = parseWorkBuddySessions(storedSessions);
     if (sessionStore.sessions.length !== 1 || sessionStore.activeId !== sessionStore.sessions[0].id) {
       throw new Error("token account list self-test failed");
@@ -342,9 +352,10 @@ const command = process.argv[2];
 const args = process.argv.slice(3);
 if (command === "install") install(args);
 else if (command === "uninstall") uninstall(dshHome(), args);
-else if (command === "login") await login();
+else if (command === "login") await login(args);
 else if (command === "--self-test") selfTest();
 else {
-  console.log("用法：dsh-workbuddy <install|login|uninstall> [--profile desktop|web|headless]");
+  console.log("用法：dsh-workbuddy install|uninstall [--profile desktop|web|headless]");
+  console.log("      dsh-workbuddy login [--region cn|global]");
   process.exitCode = 1;
 }

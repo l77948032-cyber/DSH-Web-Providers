@@ -1,4 +1,5 @@
-const DEFAULT_BILLING_HOST = "https://www.codebuddy.cn";
+import { WORKBUDDY_CN, workBuddyRegion } from "./workbuddy-regions.js";
+
 const BROWSER_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36";
 const ENTERPRISE_EDITIONS = new Set(["ultimate", "exclusive"]);
 const REMAINING_FIELDS = [
@@ -46,22 +47,23 @@ const LABEL_FIELDS = ["PackageName", "PackageTypeName", "AccountName", "ProductN
 const MAX_USAGE_PAGES = 100;
 const PAGE_SIZE = 100;
 
-function normalizeHost(value) {
-  const fallback = new URL(DEFAULT_BILLING_HOST);
+function normalizeHost(value, regionValue = WORKBUDDY_CN) {
+  const region = workBuddyRegion(regionValue);
+  const fallback = new URL(region.billingHost);
   if (typeof value !== "string" || !value.trim()) return fallback.origin;
   try {
     const candidate = new URL(value.includes("://") ? value : `https://${value}`);
     if (candidate.protocol !== "https:") return fallback.origin;
     const host = candidate.hostname.toLowerCase();
-    if (!["codebuddy.cn", "www.codebuddy.cn", "workbuddy.cn", "www.workbuddy.cn"].includes(host)) return fallback.origin;
+    if (!region.billingHosts.includes(host)) return fallback.origin;
     return candidate.origin;
   } catch {
     return fallback.origin;
   }
 }
 
-function billingHost(session) {
-  return normalizeHost(session?.auth?.domain);
+function billingHost(session, regionValue = WORKBUDDY_CN) {
+  return normalizeHost(session?.auth?.domain, regionValue);
 }
 
 function authToken(session) {
@@ -393,7 +395,8 @@ async function retry(task, attempts = 2) {
 }
 
 export async function fetchWorkBuddyCredits(session, options = {}) {
-  const host = billingHost(session);
+  const region = workBuddyRegion(options.region);
+  const host = billingHost(session, region);
   const account = session?.account && typeof session.account === "object" ? session.account : {};
   let creditResult;
   let creditError = null;

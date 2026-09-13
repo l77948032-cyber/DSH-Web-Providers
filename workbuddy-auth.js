@@ -1,15 +1,15 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
+import { WORKBUDDY_CN, workBuddyRegion } from "./workbuddy-regions.js";
 
-export const WORKBUDDY_SESSION_REF = "WORKBUDDY_LOGIN_SESSION";
-export const WORKBUDDY_SESSIONS_REF = "WORKBUDDY_LOGIN_SESSIONS";
-export const WORKBUDDY_API_KEYS_REF = "WORKBUDDY_API_KEYS";
-export const LEGACY_SESSION_REF = "CODEBUDDY_LOGIN_SESSION";
-export const LEGACY_SESSIONS_REF = "CODEBUDDY_LOGIN_SESSIONS";
-export const LEGACY_API_KEYS_REF = "CODEBUDDY_API_KEYS";
+export const WORKBUDDY_SESSION_REF = WORKBUDDY_CN.sessionRef;
+export const WORKBUDDY_SESSIONS_REF = WORKBUDDY_CN.sessionsRef;
+export const WORKBUDDY_API_KEYS_REF = WORKBUDDY_CN.apiKeysRef;
+export const LEGACY_SESSION_REF = WORKBUDDY_CN.legacySessionRefs[0];
+export const LEGACY_SESSIONS_REF = WORKBUDDY_CN.legacySessionsRefs[0];
+export const LEGACY_API_KEYS_REF = WORKBUDDY_CN.legacyApiKeysRefs[0];
 
-const BASE_URL = "https://copilot.tencent.com/v2/plugin";
 const USER_AGENT = "CLI/unknown CodeBuddy/2.137.1";
 const REQUEST_HEADERS = {
   accept: "application/json",
@@ -44,13 +44,13 @@ async function responseBody(response, action) {
   }
 }
 
-async function request(path, options, action) {
+async function request(region, path, options, action) {
   let response;
   try {
-    response = await fetch(`${BASE_URL}${path}`, options);
+    response = await fetch(`${region.authBaseUrl}${path}`, options);
   } catch (error) {
     if (options.signal?.aborted) throw new Error(`${action}已取消`, { cause: error });
-    throw new Error(`${action}无法连接 WorkBuddy 中国站`, { cause: error });
+    throw new Error(`${action}无法连接 ${region.siteName}`, { cause: error });
   }
   const body = await responseBody(response, action);
   if (!response.ok || body?.code !== 0) throw new Error(`${action}失败（${body?.message ?? body?.msg ?? response.status}）`);
@@ -65,13 +65,13 @@ function enterpriseHeaders(session) {
   };
 }
 
-async function poll(path, headers, action, timeoutMs, signal) {
+async function poll(region, path, headers, action, timeoutMs, signal) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await delay(1000, undefined, { signal });
     let response;
     try {
-      response = await fetch(`${BASE_URL}${path}`, { headers: { ...REQUEST_HEADERS, ...headers }, signal });
+      response = await fetch(`${region.authBaseUrl}${path}`, { headers: { ...REQUEST_HEADERS, ...headers }, signal });
     } catch (error) {
       if (signal?.aborted) throw new Error(`${action}已取消`, { cause: error });
       continue;
@@ -279,8 +279,9 @@ export function workBuddySessionAccounts(store) {
   }));
 }
 
-export async function loginWorkBuddy(onAuthUrl, signal) {
-  const state = await request("/auth/state?platform=CLI", {
+export async function loginWorkBuddy(onAuthUrl, signal, regionValue = WORKBUDDY_CN) {
+  const region = workBuddyRegion(regionValue);
+  const state = await request(region, "/auth/state?platform=CLI", {
     method: "POST",
     headers: { ...REQUEST_HEADERS, ...NO_ACCOUNT_HEADERS },
     body: "{}",
@@ -294,6 +295,7 @@ export async function loginWorkBuddy(onAuthUrl, signal) {
     onAuthUrl?.(state.authUrl, false);
   }
   const auth = calculateExpiresAt(await poll(
+    region,
     `/auth/token?state=${encodeURIComponent(state.state)}`,
     NO_ACCOUNT_HEADERS,
     "等待 WorkBuddy 登录",
@@ -302,6 +304,7 @@ export async function loginWorkBuddy(onAuthUrl, signal) {
   ));
   if (!auth.accessToken || !auth.refreshToken) throw new Error("WorkBuddy 登录接口没有返回完整令牌");
   const account = await poll(
+    region,
     `/login/account?state=${encodeURIComponent(state.state)}`,
     { ...enterpriseHeaders({ auth }), authorization: `Bearer ${auth.accessToken}`, ...NO_ID_HEADERS },
     "获取 WorkBuddy 账号",
@@ -311,9 +314,10 @@ export async function loginWorkBuddy(onAuthUrl, signal) {
   return { auth, account: normalizeAccount(account, auth) };
 }
 
-export async function refreshWorkBuddySession(session, signal) {
+export async function refreshWorkBuddySession(session, signal, regionValue = WORKBUDDY_CN) {
+  const region = workBuddyRegion(regionValue);
   if (!session?.auth?.refreshToken) throw new Error("WorkBuddy 登录会话缺少刷新令牌，请重新登录");
-  const auth = await request("/auth/token/refresh", {
+  const auth = await request(region, "/auth/token/refresh", {
     method: "POST",
     headers: {
       ...REQUEST_HEADERS,

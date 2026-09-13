@@ -6,10 +6,6 @@ import * as dshSettings from "@deepseek-ai/dsh-settings";
 import { createProvider } from "@earendil-works/pi-ai";
 import * as openAICompletionsApi from "@earendil-works/pi-ai/api/openai-completions";
 import {
-  WORKBUDDY_SESSION_REF,
-  WORKBUDDY_SESSIONS_REF,
-  LEGACY_SESSION_REF,
-  LEGACY_SESSIONS_REF,
   activeWorkBuddySession,
   createWorkBuddySessionStore,
   parseWorkBuddySession,
@@ -23,6 +19,12 @@ import {
 } from "./workbuddy-auth.js";
 import { installWorkBuddyWeb } from "./workbuddy-web.js";
 import { modelMetadataFromConfig, selectWorkBuddyModelRecords } from "./workbuddy-models.js";
+import {
+  WORKBUDDY_CN,
+  WORKBUDDY_REGIONS,
+  allWorkBuddyProviderIds,
+  workBuddyRegion,
+} from "./workbuddy-regions.js";
 
 export { Config };
 
@@ -30,14 +32,8 @@ export const name = "llm-workbuddy";
 export const inject = ["llm"];
 
 const NS = typeof dshSettings.settingsNamespace === "function" ? dshSettings.settingsNamespace("llm-workbuddy") : "llm-workbuddy";
-const PROVIDER = "workbuddy-cn";
-const LEGACY_PROVIDER = "codebuddy-cn";
-const WORKBUDDY_PROVIDERS = new Set([PROVIDER, LEGACY_PROVIDER]);
-const DISPLAY_NAME = "WorkBuddy 中国区";
-const API_KEY_ENV = "WORKBUDDY_API_KEY";
-const LEGACY_API_KEY_ENV = "CODEBUDDY_API_KEY";
-const BASE_URL = "https://copilot.tencent.com/v2";
-const CONFIG_URL = "https://copilot.tencent.com/v3/config";
+const PROVIDER = WORKBUDDY_CN.provider;
+const WORKBUDDY_PROVIDERS = new Set(allWorkBuddyProviderIds());
 const USER_AGENT = "CLI/unknown CodeBuddy/2.137.1";
 const STREAM_IDLE_TIMEOUT_MS = 300_000;
 const NO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -61,7 +57,7 @@ const workBuddyApi = {
   streamSimple: (model, context, options) => openAICompletionsApi.streamSimple(model, context, workBuddyRequestOptions(options)),
 };
 
-const FALLBACK_MODELS = [
+const FALLBACK_MODEL_DEFS = [
   ["hy3", "Hy3", 192000, 64000, true],
   ["glm-5.2", "GLM-5.2", 1000000, 48000, false],
   ["glm-5.1", "GLM-5.1", 200000, 48000, false],
@@ -73,17 +69,23 @@ const FALLBACK_MODELS = [
   ["kimi-k2.6", "Kimi-K2.6", 256000, 32000, true],
   ["deepseek-v4-pro", "DeepSeek V4 Pro", 1000000, 50000, true],
   ["deepseek-v4-flash", "DeepSeek V4 Flash", 1000000, 50000, true],
-].map(([id, modelName, contextWindow, maxTokens, images]) =>
-  workBuddyModel({ id, name: modelName, contextWindow, maxTokens, images }),
-);
+];
 
-function workBuddyModel({ provider = PROVIDER, id, name: modelName, contextWindow, maxTokens, images, reasoning = true, thinkingLevelMap = { off: null }, defaultReasoningEffort, thinkingFormat }) {
+function fallbackModels(regionValue = WORKBUDDY_CN) {
+  const region = workBuddyRegion(regionValue);
+  return FALLBACK_MODEL_DEFS.map(([id, modelName, contextWindow, maxTokens, images]) =>
+    workBuddyModel(region, { id, name: modelName, contextWindow, maxTokens, images }),
+  );
+}
+
+function workBuddyModel(regionValue, { provider, id, name: modelName, contextWindow, maxTokens, images, reasoning = true, thinkingLevelMap = { off: null }, defaultReasoningEffort, thinkingFormat }) {
+  const region = workBuddyRegion(regionValue);
   return {
     id,
     name: modelName,
     api: "openai-completions",
-    provider,
-    baseUrl: BASE_URL,
+    provider: provider ?? region.provider,
+    baseUrl: region.baseUrl,
     reasoning,
     ...(reasoning ? { thinkingLevelMap: { ...thinkingLevelMap } } : {}),
     ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),
@@ -139,14 +141,16 @@ function text(...values) {
   return values.find((value) => typeof value === "string" && value.length > 0);
 }
 
-function modelsFromConfig(data) {
+function modelsFromConfig(data, regionValue = WORKBUDDY_CN) {
+  const region = workBuddyRegion(regionValue);
+  const fallbackCatalog = fallbackModels(region);
   return selectWorkBuddyModelRecords(data).flatMap((raw) => {
     const id = raw.id;
-    const fallback = FALLBACK_MODELS.find((model) => model.id === id);
+    const fallback = fallbackCatalog.find((model) => model.id === id);
     const contextWindow = positiveInteger(raw.maxInputTokens, raw.maxAllowedSize, fallback?.contextWindow);
     const maxTokens = positiveInteger(raw.maxOutputTokens, fallback?.maxTokens);
     if (!contextWindow || !maxTokens) return [];
-    return [workBuddyModel({
+    return [workBuddyModel(region, {
       id,
       name: text(raw.name, fallback?.name, id),
       contextWindow,
@@ -158,21 +162,23 @@ function modelsFromConfig(data) {
 }
 
 function authenticationHeaders(credential) {
-  const value = assertUsableApiKey(credential.value, name, credential.ref ?? API_KEY_ENV);
+  const value = assertUsableApiKey(credential.value, name, credential.ref ?? WORKBUDDY_CN.apiKeyEnv);
   return credential.kind === "bearer" ? { authorization: `Bearer ${value}` } : { "x-api-key": value };
 }
 
-async function fetchWorkBuddyModels(credential, signal) {
-  const data = await fetchWorkBuddyConfiguration(credential, signal);
-  const models = modelsFromConfig(data);
-  if (models.length === 0) throw new LlmError("WorkBuddy 没有返回 CLI 可用模型", "DISCOVERY_FAILED");
+async function fetchWorkBuddyModels(regionValue, credential, signal) {
+  const region = workBuddyRegion(regionValue);
+  const data = await fetchWorkBuddyConfiguration(region, credential, signal);
+  const models = modelsFromConfig(data, region);
+  if (models.length === 0) throw new LlmError(`${region.displayName}没有返回 CLI 可用模型`, "DISCOVERY_FAILED");
   return models;
 }
 
-async function fetchWorkBuddyConfiguration(credential, signal) {
+async function fetchWorkBuddyConfiguration(regionValue, credential, signal) {
+  const region = workBuddyRegion(regionValue);
   let response;
   try {
-    response = await fetch(CONFIG_URL, {
+    response = await fetch(region.configUrl, {
       headers: {
         accept: "application/json",
         ...authenticationHeaders(credential),
@@ -182,17 +188,18 @@ async function fetchWorkBuddyConfiguration(credential, signal) {
       signal,
     });
   } catch (error) {
-    if (signal?.aborted) throw new LlmError("WorkBuddy 模型列表获取已取消", "ABORTED", { cause: error });
-    throw new LlmError("无法连接 WorkBuddy 模型配置接口", "DISCOVERY_FAILED", { cause: error });
+    if (signal?.aborted) throw new LlmError(`${region.displayName}模型列表获取已取消`, "ABORTED", { cause: error });
+    throw new LlmError(`无法连接${region.displayName}模型配置接口`, "DISCOVERY_FAILED", { cause: error });
   }
-  if (!response.ok) throw new LlmError(`WorkBuddy 模型配置接口返回 ${response.status}`, "DISCOVERY_FAILED");
+  if (!response.ok) throw new LlmError(`${region.displayName}模型配置接口返回 ${response.status}`, "DISCOVERY_FAILED");
   const body = await response.json();
-  if (body?.code !== 0) throw new LlmError(`WorkBuddy 模型配置接口错误：${body?.msg ?? body?.code}`, "DISCOVERY_FAILED");
+  if (body?.code !== 0) throw new LlmError(`${region.displayName}模型配置接口错误：${body?.msg ?? body?.code}`, "DISCOVERY_FAILED");
   return body.data;
 }
 
-async function fetchWorkBuddyModelCatalog(credential, signal) {
-  return modelMetadataFromConfig(await fetchWorkBuddyConfiguration(credential, signal));
+async function fetchWorkBuddyModelCatalog(regionValue, credential, signal) {
+  const region = workBuddyRegion(regionValue);
+  return modelMetadataFromConfig(await fetchWorkBuddyConfiguration(region, credential, signal));
 }
 
 /**
@@ -202,13 +209,14 @@ async function fetchWorkBuddyModelCatalog(credential, signal) {
  * This small adapter accepts both contracts and keeps bearer/API-key values
  * opaque to the provider implementation.
  */
-function workBuddyApiKeyAuth() {
+function workBuddyApiKeyAuth(regionValue = WORKBUDDY_CN) {
+  const region = workBuddyRegion(regionValue);
   return {
-    name: `${DISPLAY_NAME} API Key`,
+    name: `${region.displayName} API Key`,
     login: async (interaction) => {
       const signal = interaction?.signal;
       signal?.throwIfAborted?.();
-      const key = await interaction.prompt({ type: "secret", message: `Enter ${DISPLAY_NAME} API Key` });
+      const key = await interaction.prompt({ type: "secret", message: `Enter ${region.displayName} API Key` });
       signal?.throwIfAborted?.();
       return { type: "api_key", key };
     },
@@ -224,13 +232,14 @@ function workBuddyApiKeyAuth() {
   };
 }
 
-function workBuddyProvider(models, provider = PROVIDER) {
+function workBuddyProvider(regionValue, models) {
+  const region = workBuddyRegion(regionValue);
   return createProvider({
-    id: provider,
-    name: DISPLAY_NAME,
-    baseUrl: BASE_URL,
-    auth: { apiKey: workBuddyApiKeyAuth() },
-    models: models.map((model) => ({ ...model, provider })),
+    id: region.provider,
+    name: region.displayName,
+    baseUrl: region.baseUrl,
+    auth: { apiKey: workBuddyApiKeyAuth(region) },
+    models: models.map((model) => ({ ...model, provider: region.provider, baseUrl: region.baseUrl })),
     api: workBuddyApi,
   });
 }
@@ -263,13 +272,14 @@ function withoutReasoningControl(modelInfo) {
   return fixed;
 }
 
-function selectWorkBuddyModels(base, entries) {
+function selectWorkBuddyModels(base, entries, regionValue = WORKBUDDY_CN) {
+  const region = workBuddyRegion(regionValue);
   if (!Array.isArray(entries) || entries.length === 0) return base;
   const byId = new Map(base.map((model) => [model.id, model]));
   return entries.map((entry) => {
     const model = byId.get(entry.id);
     const reasoning = configuredReasoning(entry, model);
-    return workBuddyModel({
+    return workBuddyModel(region, {
       id: entry.id,
       name: entry.name ?? model?.name ?? entry.id,
       contextWindow: entry.contextWindow ?? model?.contextWindow ?? 262144,
@@ -284,11 +294,12 @@ function runtimeHeaders(headers) {
   return { ...(headers ?? {}) };
 }
 
-function workBuddySource(config, source) {
+function workBuddySource(config, source, regionValue = WORKBUDDY_CN) {
+  const region = workBuddyRegion(regionValue);
   const providers = config?.providers ?? {};
-  return Object.hasOwn(providers, PROVIDER) || Object.hasOwn(providers, LEGACY_PROVIDER)
+  return [region.provider, ...region.aliases].some((provider) => Object.hasOwn(providers, provider))
     ? source
-    : { ...source, apiKeyEnv: source.apiKeyEnv ?? API_KEY_ENV };
+    : { ...source, apiKeyEnv: source.apiKeyEnv ?? region.apiKeyEnv };
 }
 
 function installSettingsCompat(ctx, ns, schema, entry, hooks) {
@@ -305,6 +316,9 @@ function installSettingsCompat(ctx, ns, schema, entry, hooks) {
 
 export const __testing = Object.freeze({
   authenticationHeaders,
+  fetchWorkBuddyConfiguration,
+  fetchWorkBuddyModelCatalog,
+  fetchWorkBuddyModels,
   workBuddyApiKeyAuth,
   workBuddyRequestOptions,
   workBuddySource,
@@ -314,29 +328,36 @@ export const __testing = Object.freeze({
   runtimeHeaders,
   selectWorkBuddyModels,
   provider: PROVIDER,
+  providers: WORKBUDDY_REGIONS.map((region) => region.provider),
+  regions: WORKBUDDY_REGIONS,
   settingsNamespace: NS,
 });
 
 export function apply(ctx, config) {
   installWorkBuddyWeb(ctx, { fetchModelCatalog: fetchWorkBuddyModelCatalog });
   let current = () => config;
-  let remoteModels;
+  const remoteModels = new Map();
+  const remoteModelsKey = new Map();
   let generation = 0;
   let memoRaw;
   let memoGeneration = -1;
   let memoized;
-  let loginSessionPromise;
-  let remoteModelsKey;
+  const loginSessionPromises = new Map();
 
   const effectiveConfig = () => {
     const raw = current() ?? {};
     const providers = raw.providers ?? {};
-    const configured = providers[PROVIDER] ?? providers[LEGACY_PROVIDER];
+    const additions = {};
+    for (const region of WORKBUDDY_REGIONS) {
+      const configured = providers[region.provider]
+        ?? region.aliases.map((provider) => providers[provider]).find((profile) => profile !== undefined);
+      additions[region.provider] = configured ?? { apiKeyEnv: region.apiKeyEnv };
+    }
     return {
       ...raw,
       providers: {
         ...providers,
-        [PROVIDER]: configured ?? { apiKeyEnv: API_KEY_ENV },
+        ...additions,
       },
     };
   };
@@ -345,28 +366,31 @@ export function apply(ctx, config) {
     const raw = effectiveConfig();
     if (memoRaw === current() && memoGeneration === generation && memoized) return memoized;
     const result = new Map();
-    const source = raw.providers[PROVIDER];
-    const sourceWithAuth = workBuddySource(current(), source);
-    const models = selectWorkBuddyModels(remoteModels ?? FALLBACK_MODELS, source.models);
-    const configured = new Map((source.models ?? []).flatMap((model) =>
-      Number.isSafeInteger(model.maxTokens) && model.maxTokens > 0 ? [[model.id, model.maxTokens]] : [],
-    ));
-    result.set(PROVIDER, resolvedProfile(PROVIDER, {
-      ...sourceWithAuth,
-      displayName: DISPLAY_NAME,
-    }, workBuddyProvider(models), configured));
+    for (const region of WORKBUDDY_REGIONS) {
+      const source = raw.providers[region.provider];
+      const sourceWithAuth = workBuddySource(current(), source, region);
+      const models = selectWorkBuddyModels(remoteModels.get(region.provider) ?? fallbackModels(region), source.models, region);
+      const configured = new Map((source.models ?? []).flatMap((model) =>
+        Number.isSafeInteger(model.maxTokens) && model.maxTokens > 0 ? [[model.id, model.maxTokens]] : [],
+      ));
+      result.set(region.provider, resolvedProfile(region.provider, {
+        ...sourceWithAuth,
+        displayName: region.displayName,
+      }, workBuddyProvider(region, models), configured));
+    }
     memoRaw = current();
     memoGeneration = generation;
     memoized = result;
     return result;
   };
 
-  const resolveLoginSession = async () => {
-    loginSessionPromise ??= (async () => {
+  const resolveLoginSession = async (regionValue) => {
+    const region = workBuddyRegion(regionValue);
+    if (!loginSessionPromises.has(region.provider)) loginSessionPromises.set(region.provider, (async () => {
       const credentials = ctx.get("credentials");
       const env = launchEnvironmentOf(ctx);
-      const sessionsRef = credentialRef(WORKBUDDY_SESSIONS_REF);
-      const sessionRefs = [sessionsRef, credentialRef(LEGACY_SESSIONS_REF)];
+      const sessionsRef = credentialRef(region.sessionsRef);
+      const sessionRefs = [region.sessionsRef, ...region.legacySessionsRefs].map(credentialRef);
       let sessionsValue;
       for (const ref of sessionRefs) {
         const storedSessions = await credentials?.resolve(ref);
@@ -377,41 +401,42 @@ export function apply(ctx, config) {
       if (sessionsValue) {
         store = parseWorkBuddySessions(sessionsValue);
       } else {
-        const legacyRefs = [credentialRef(WORKBUDDY_SESSION_REF), credentialRef(LEGACY_SESSION_REF)];
+        const legacyRefs = [region.sessionRef, ...region.legacySessionRefs].map(credentialRef);
         let legacyValue;
         for (const ref of legacyRefs) {
           const storedLegacy = await credentials?.resolve(ref);
           legacyValue = storedLegacy?.value ?? env.get(ref)?.value;
           if (legacyValue) break;
         }
-        if (!legacyValue) throw new Error("未找到 WorkBuddy 登录凭据");
+        if (!legacyValue) throw new Error(`未找到${region.displayName}登录凭据`);
         const legacy = parseWorkBuddySession(legacyValue);
         store = createWorkBuddySessionStore([legacy]);
       }
       const active = activeWorkBuddySession(store);
-      if (!active) throw new Error("未找到 WorkBuddy 登录账号");
+      if (!active) throw new Error(`未找到${region.displayName}登录账号`);
       let session = active;
       if (sessionNeedsRefresh(session)) {
-        session = { ...session, ...(await refreshWorkBuddySession(session)), updatedAt: Date.now() };
+        session = { ...session, ...(await refreshWorkBuddySession(session, undefined, region)), updatedAt: Date.now() };
         const nextStore = upsertWorkBuddySession({ ...store, activeId: active.id }, session);
         await credentials?.set(sessionsRef, serializeWorkBuddySessions(nextStore));
-        await credentials?.set(credentialRef(WORKBUDDY_SESSION_REF), serializeWorkBuddySession(session));
+        await credentials?.set(credentialRef(region.sessionRef), serializeWorkBuddySession(session));
       }
       return { ...session, sessionId: active.id, expiresAt: sessionCacheDeadline(session) };
     })().finally(() => {
-      loginSessionPromise = undefined;
-    });
-    return loginSessionPromise;
+      loginSessionPromises.delete(region.provider);
+    }));
+    return loginSessionPromises.get(region.provider);
   };
 
   const resolveCredential = async (provider, profile) => {
+    const region = workBuddyRegion(provider);
     const ref = profile.apiKeyEnv;
     if (!ref && WORKBUDDY_PROVIDERS.has(provider)) {
       let session;
       try {
-        session = await resolveLoginSession();
+        session = await resolveLoginSession(region);
       } catch (error) {
-        throw new LlmError(`${name}: 未找到可用的 WorkBuddy 登录令牌，请在模型设置中登录 WorkBuddy`, "MISSING_CREDENTIAL", { cause: error });
+        throw new LlmError(`${name}: 未找到可用的${region.displayName}登录令牌，请在模型设置中登录`, "MISSING_CREDENTIAL", { cause: error });
       }
       profile.headers ??= {};
       if (session.account.userId) profile.headers["X-User-Id"] = session.account.userId;
@@ -420,15 +445,18 @@ export function apply(ctx, config) {
         profile.headers["X-Tenant-Id"] = session.account.enterpriseId;
       }
       if (session.auth.domain) profile.headers["X-Domain"] = session.auth.domain;
-      return { value: assertUsableApiKey(session.auth.accessToken, name, "WorkBuddy login session"), kind: "bearer", sessionId: session.sessionId };
+      return { value: assertUsableApiKey(session.auth.accessToken, name, `${region.displayName} login session`), kind: "bearer", sessionId: session.sessionId };
     }
     if (!ref) return { value: undefined, kind: "none" };
     const stored = await ctx.get("credentials")?.resolve(ref);
     let value = stored?.value ?? launchEnvironmentOf(ctx).get(ref)?.value;
-    if (!value && ref === API_KEY_ENV) {
-      const legacyRef = credentialRef(LEGACY_API_KEY_ENV);
-      const legacyStored = await ctx.get("credentials")?.resolve(legacyRef);
-      value = legacyStored?.value ?? launchEnvironmentOf(ctx).get(legacyRef)?.value;
+    if (!value && ref === region.apiKeyEnv) {
+      for (const legacyEnv of region.legacyApiKeyEnvs) {
+        const legacyRef = credentialRef(legacyEnv);
+        const legacyStored = await ctx.get("credentials")?.resolve(legacyRef);
+        value = legacyStored?.value ?? launchEnvironmentOf(ctx).get(legacyRef)?.value;
+        if (value) break;
+      }
     }
     if (value) return { value: assertUsableApiKey(value, name, ref), kind: "api-key", ref };
     throw new LlmError(`${name}: Provider "${provider}" 缺少 API Key，请在 WebUI 的模型设置中填写`, "MISSING_CREDENTIAL");
@@ -454,52 +482,54 @@ export function apply(ctx, config) {
       : prepared;
   };
   const listModels = adapter.listModels.bind(adapter);
-  let refreshPromise;
+  const refreshPromises = new Map();
   adapter.listModels = async (provider) => {
     if (WORKBUDDY_PROVIDERS.has(provider)) {
-      refreshPromise ??= (async () => {
+      const region = workBuddyRegion(provider);
+      if (!refreshPromises.has(region.provider)) refreshPromises.set(region.provider, (async () => {
         try {
           const profile = profiles().get(provider);
           const credential = await resolveCredential(provider, profile);
-          const cacheKey = credential.kind === "bearer" ? `token:${credential.sessionId ?? "active"}` : `api:${credential.ref ?? API_KEY_ENV}`;
-          if (remoteModels && remoteModelsKey === cacheKey) return;
-          remoteModels = await fetchWorkBuddyModels(credential);
-          remoteModelsKey = cacheKey;
+          const cacheKey = credential.kind === "bearer" ? `token:${credential.sessionId ?? "active"}` : `api:${credential.ref ?? region.apiKeyEnv}`;
+          if (remoteModels.has(region.provider) && remoteModelsKey.get(region.provider) === cacheKey) return;
+          remoteModels.set(region.provider, await fetchWorkBuddyModels(region, credential));
+          remoteModelsKey.set(region.provider, cacheKey);
           generation += 1;
         } catch {
           // Keep the built-in catalog available while the key or network is absent.
         }
       })().finally(() => {
-        refreshPromise = undefined;
-      });
-      await refreshPromise;
+        refreshPromises.delete(region.provider);
+      }));
+      await refreshPromises.get(region.provider);
     }
     return listModels(provider);
   };
 
-  const directoryEntries = () => [{
-    provider: PROVIDER,
-    displayName: DISPLAY_NAME,
+  const directoryEntries = () => WORKBUDDY_REGIONS.map((region) => ({
+    provider: region.provider,
+    displayName: region.displayName,
     settingsNs: NS,
-    settingsPath: ["providers", PROVIDER],
+    settingsPath: ["providers", region.provider],
     declared: false,
-  }];
+  }));
 
   let directory = ctx.llm.registerConfigurableProviders(directoryEntries());
-  let registration = ctx.llm.registerAdapter([PROVIDER], adapter);
+  let registration = ctx.llm.registerAdapter(WORKBUDDY_REGIONS.map((region) => region.provider), adapter);
 
   ctx.llm.registerModelDiscovery(NS, async (request, signal) => {
-    if (request.provider !== PROVIDER) {
+    const region = WORKBUDDY_REGIONS.find((entry) => entry.provider === request.provider);
+    if (!region) {
       throw new LlmError(`没有 Provider "${request.provider ?? ""}" 的模型目录`, "DISCOVERY_FAILED");
     }
-    const profile = profiles().get(PROVIDER);
+    const profile = profiles().get(region.provider);
     const credential = request.apiKey
-      ? { value: request.apiKey, kind: "api-key", ref: API_KEY_ENV }
-      : await resolveCredential(PROVIDER, profile);
-    remoteModels = await fetchWorkBuddyModels(credential, signal);
-    remoteModelsKey = credential.kind === "bearer" ? `token:${credential.sessionId ?? "active"}` : `api:${credential.ref ?? API_KEY_ENV}`;
+      ? { value: request.apiKey, kind: "api-key", ref: region.apiKeyEnv }
+      : await resolveCredential(region.provider, profile);
+    remoteModels.set(region.provider, await fetchWorkBuddyModels(region, credential, signal));
+    remoteModelsKey.set(region.provider, credential.kind === "bearer" ? `token:${credential.sessionId ?? "active"}` : `api:${credential.ref ?? region.apiKeyEnv}`);
     generation += 1;
-    return remoteModels.map((model) => ({
+    return remoteModels.get(region.provider).map((model) => ({
       id: model.id,
       name: model.name,
       contextWindow: model.contextWindow,
@@ -517,7 +547,7 @@ export function apply(ctx, config) {
     onChange() {
       memoRaw = undefined;
       profiles();
-      registration.replace([PROVIDER]);
+      registration.replace(WORKBUDDY_REGIONS.map((region) => region.provider));
       directory.replace(directoryEntries());
     },
   });

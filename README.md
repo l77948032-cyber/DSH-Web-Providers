@@ -1,7 +1,8 @@
 # DSH WorkBuddy Provider
 
-以独立 Provider 为 DeepSeek Harness（DSH）接入 `WorkBuddy 中国区` 模型。支持
-WorkBuddy API Key 和中国站网页登录令牌，不要求安装 WorkBuddy Desktop 或 WorkBuddy CLI。
+以两个彼此隔离的 Provider 为 DeepSeek Harness（DSH）接入 `WorkBuddy 中国区` 与
+`WorkBuddy 国际版` 模型。支持 API Key 和网页登录令牌，不要求安装 WorkBuddy Desktop
+或 WorkBuddy CLI。
 
 本项目基于 [Axiaohungry/dsh-llm-workbuddy](https://github.com/Axiaohungry/dsh-llm-workbuddy)
 修改，保留 MIT 许可证与上游归属。
@@ -15,7 +16,8 @@ WorkBuddy API Key 和中国站网页登录令牌，不要求安装 WorkBuddy Des
 这个分支不会替换 DSH 内置的 `llm-pi-ai`：
 
 - Cordis 补丁只新增 `llm-workbuddy`，不禁用任何内置插件；
-- 运行时只注册 `workbuddy-cn`，不会代理其他 Provider 的请求；
+- 运行时只注册 `workbuddy-cn` 和 `workbuddy-global`，不会代理其他 Provider 的请求；
+- 中国区与国际版使用各自的端点、API Key 目录和登录会话，凭据不会串用；
 - 使用独立的 `llm-workbuddy` 设置命名空间；
 - OpenAI、Anthropic、自定义网关等 Provider 继续由 DSH 原生 Adapter 负责；
 - CLI 写入令牌时以 `0600` 权限原子替换凭据文件。
@@ -25,8 +27,8 @@ Provider 同时出现在模型选择器中。
 
 ## 功能
 
-- API Key 与网页登录令牌两种认证模式；
-- 无需下载 WorkBuddy 客户端即可在浏览器登录；
+- 中国区和国际版均提供 API Key 与网页登录令牌两种认证模式；
+- 无需下载 WorkBuddy 客户端即可在各自站点的浏览器页面登录；
 - 多 API Key、多登录账号和账号切换；
 - 自动刷新网页登录令牌；
 - 在线获取当前账号可用模型，失败时使用内置目录；
@@ -49,13 +51,13 @@ Provider 同时出现在模型选择器中。
 ### 普通 DSH Web
 
 ```sh
-dsh plugin --profile web add github:l77948032-cyber/DSH-Workbuddy#v1.1.1
+dsh plugin --profile web add github:l77948032-cyber/DSH-Workbuddy#v1.2.0
 ```
 
 如果同时使用 headless Profile，需要分别安装：
 
 ```sh
-dsh plugin --profile headless add github:l77948032-cyber/DSH-Workbuddy#v1.1.1
+dsh plugin --profile headless add github:l77948032-cyber/DSH-Workbuddy#v1.2.0
 ```
 
 安装后重启 DSH。不要同时启用上游包 `@axiaohungry/dsh-llm-workbuddy`，两个包使用相同的
@@ -66,7 +68,7 @@ Cordis 插件 ID。
 先完全退出 DSH Desktop，再运行：
 
 ```sh
-npx --yes --package=github:l77948032-cyber/DSH-Workbuddy#v1.1.1 \
+npx --yes --package=github:l77948032-cyber/DSH-Workbuddy#v1.2.0 \
   dsh-workbuddy install --profile desktop
 ```
 
@@ -76,7 +78,7 @@ npx --yes --package=github:l77948032-cyber/DSH-Workbuddy#v1.1.1 \
 卸载方式：
 
 ```sh
-npx --yes --package=github:l77948032-cyber/DSH-Workbuddy#v1.1.1 \
+npx --yes --package=github:l77948032-cyber/DSH-Workbuddy#v1.2.0 \
   dsh-workbuddy uninstall --profile desktop
 ```
 
@@ -86,13 +88,14 @@ npx --yes --package=github:l77948032-cyber/DSH-Workbuddy#v1.1.1 \
 
 ## 配置
 
-打开 **设置 -> 模型**，添加或编辑 `WorkBuddy 中国区`。
+打开 **设置 -> 模型**，添加或编辑 `WorkBuddy 中国区` 或 `WorkBuddy 国际版`。两个
+Provider 可以同时启用，也可以分别选择 API Key 或网页登录模式。
 
 ### 网页登录
 
 1. 选择 `网页登录`；
 2. 点击“登录 WorkBuddy”；
-3. 在打开的浏览器页面完成登录；
+3. 在打开的对应区域页面完成登录；
 4. 返回 DSH，选择需要使用的账号。
 
 令牌保存在 DSH 凭据服务中，不写入 `settings.yaml`。过期前插件会使用 WorkBuddy 刷新接口
@@ -100,10 +103,14 @@ npx --yes --package=github:l77948032-cyber/DSH-Workbuddy#v1.1.1 \
 
 ### API Key
 
-选择 `API Key` 后，可以使用环境变量 `WORKBUDDY_API_KEY`，也可以在插件界面保存多个 Key。
-Key 的值只进入 DSH 凭据服务，设置文件仅保存凭据引用。
+选择 `API Key` 后，也可以在插件界面保存多个 Key。Key 的值只进入 DSH 凭据服务，设置
+文件仅保存凭据引用。
 
-旧环境变量 `CODEBUDDY_API_KEY` 仍兼容。
+- 中国区环境变量：`WORKBUDDY_API_KEY`，并兼容旧名称 `CODEBUDDY_API_KEY`；
+- 国际版环境变量：`WORKBUDDY_GLOBAL_API_KEY`，并兼容 `CODEBUDDY_GLOBAL_API_KEY`。
+
+中国区与国际版的 Key 列表独立保存。为避免把旧中国区配置误用于国际站，国际版不会自动
+读取没有区域后缀的 `CODEBUDDY_API_KEY`。
 
 ## 模型目录
 
@@ -117,15 +124,29 @@ Key 的值只进入 DSH 凭据服务，设置文件仅保存凭据引用。
 
 ## 请求边界
 
-模型请求发送到 WorkBuddy 中国区接口：
+中国区模型请求发送到：
 
 ```text
 https://copilot.tencent.com/v2
 https://copilot.tencent.com/v3/config
 ```
 
-令牌模式另外使用腾讯的登录刷新与 CodeBuddy billing 接口。插件不向本项目作者或其他统计
-服务发送凭据、提示词或模型响应。
+国际版模型请求发送到：
+
+```text
+https://www.codebuddy.ai/v2
+https://www.codebuddy.ai/v3/config
+```
+
+令牌模式另外使用各区域的登录刷新与 CodeBuddy billing 接口。国际版 billing 暂按与中国区
+相同的路径和响应格式适配，仍需使用真实国际版账号完成最终校准。插件不向本项目作者或其他
+统计服务发送凭据、提示词或模型响应。
+
+CLI 网页登录默认进入中国区，也可以显式选择国际版：
+
+```sh
+dsh-workbuddy login --region global
+```
 
 ## 开发
 
@@ -135,8 +156,8 @@ npm run check
 npm pack --dry-run
 ```
 
-测试包含 Provider 隔离断言：即使配置中存在其他自定义 Provider，插件也只允许注册
-`workbuddy-cn`。
+测试包含 Provider 隔离断言：即使配置中存在其他自定义 Provider，插件也只注册
+`workbuddy-cn` 与 `workbuddy-global`，并分别校验国际站模型、登录刷新和 billing 地址。
 
 ## License
 

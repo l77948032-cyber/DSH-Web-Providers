@@ -19,19 +19,48 @@ import {
   upsertWorkBuddyApiKey,
   upsertWorkBuddySession,
 } from "./workbuddy-auth.js";
-import { authenticationMode } from "./workbuddy-web.js";
+import { authenticationMode, installWorkBuddyWeb } from "./workbuddy-web.js";
 import { __testing as creditsTesting, fetchWorkBuddyCredits } from "./workbuddy-credits.js";
 import { AUTO_TIER_MODELS, formatCreditsCoefficient, isPromotionActive, modelMetadataFromConfig } from "./workbuddy-models.js";
+import { WORKBUDDY_CN, WORKBUDDY_GLOBAL, workBuddyRegion } from "./workbuddy-regions.js";
+
+function localRequest(body) {
+  const raw = Buffer.from(JSON.stringify(body));
+  return {
+    method: "POST",
+    socket: { remoteAddress: "127.0.0.1" },
+    headers: { origin: "http://127.0.0.1:18888" },
+    async *[Symbol.asyncIterator]() {
+      yield raw;
+    },
+  };
+}
+
+async function invokeRoute(handler, body) {
+  let status;
+  let raw = "";
+  const res = {
+    writeHead(value) {
+      status = value;
+    },
+    end(value) {
+      raw = value ?? "";
+    },
+  };
+  await handler(localRequest(body), res);
+  return { status, body: JSON.parse(raw) };
+}
 
 test("客户端兼容包装 Provider 并将 WorkBuddy 用量并入统计行", () => {
   const client = readFileSync(new URL("./client.js", import.meta.url), "utf8");
   assert.match(client, /WORKBUDDY_PROVIDER_PATTERN/);
-  assert.match(client, /isWorkBuddyProvider\(provider\)/);
+  assert.match(client, /GLOBAL_PROVIDER = "workbuddy-global"/);
+  assert.match(client, /workBuddyProviderId\(provider\)/);
   assert.match(client, /data-composer-stats/);
   assert.match(client, /display: grid !important/);
   assert.match(client, /settings\.models\.provider-card/);
   assert.match(client, /key: "llm-workbuddy"/);
-  assert.match(client, /authRequest\("models", \{\}\)/);
+  assert.match(client, /authRequest\("models", \{\}, provider\)/);
   assert.match(client, /data-workbuddy-model-rate/);
   assert.match(client, /\\p\{L\}\\p\{N\}/);
   assert.match(client, /section\.querySelectorAll\('button, \[role="menuitemradio"\], \[role="menuitem"\]'\)/);
@@ -106,13 +135,14 @@ test("远端只下发折后倍率时保留 WorkBuddy 当前活动标识", () => 
 test("插件使用独立命名空间且不禁用原生 pi-ai Adapter", () => {
   const patch = readFileSync(new URL("./cordis.patch.yml", import.meta.url), "utf8");
   assert.equal(__testing.provider, "workbuddy-cn");
+  assert.deepEqual(__testing.providers, ["workbuddy-cn", "workbuddy-global"]);
   assert.equal(__testing.settingsNamespace, "llm-workbuddy");
   assert.doesNotMatch(patch, /id:\s*llm-pi-ai/);
   assert.doesNotMatch(patch, /disabled:\s*true/);
   assert.match(patch, /@l77948032-cyber\/dsh-workbuddy/);
 });
 
-test("运行时只注册 WorkBuddy，不接管已有自定义 Provider", () => {
+test("运行时只注册中国区和国际版 WorkBuddy，不接管已有自定义 Provider", () => {
   const seen = { adapters: [], directories: [], discoveries: [] };
   const replaceable = () => Object.assign(() => {}, { replace() {} });
   const ctx = {
@@ -144,8 +174,8 @@ test("运行时只注册 WorkBuddy，不接管已有自定义 Provider", () => {
     },
   });
 
-  assert.deepEqual(seen.adapters, [["workbuddy-cn"]]);
-  assert.deepEqual(seen.directories.map((entries) => entries.map((entry) => entry.provider)), [["workbuddy-cn"]]);
+  assert.deepEqual(seen.adapters, [["workbuddy-cn", "workbuddy-global"]]);
+  assert.deepEqual(seen.directories.map((entries) => entries.map((entry) => entry.provider)), [["workbuddy-cn", "workbuddy-global"]]);
   assert.deepEqual(seen.discoveries, ["llm-workbuddy"]);
 });
 
@@ -191,6 +221,8 @@ test("显式空配置启用令牌模式，未配置时仍使用 API Key", () => 
   assert.equal(__testing.workBuddySource({}, {}).apiKeyEnv, "WORKBUDDY_API_KEY");
   assert.equal(__testing.workBuddySource({ providers: { "workbuddy-cn": {} } }, {}).apiKeyEnv, undefined);
   assert.equal(__testing.workBuddySource({ providers: { "codebuddy-cn": {} } }, {}).apiKeyEnv, undefined);
+  assert.equal(__testing.workBuddySource({}, {}, WORKBUDDY_GLOBAL).apiKeyEnv, "WORKBUDDY_GLOBAL_API_KEY");
+  assert.equal(__testing.workBuddySource({ providers: { "workbuddy-global": {} } }, {}, WORKBUDDY_GLOBAL).apiKeyEnv, undefined);
 });
 
 test("WebUI 可以区分 API Key 与令牌认证模式", () => {
@@ -198,6 +230,108 @@ test("WebUI 可以区分 API Key 与令牌认证模式", () => {
   assert.equal(authenticationMode({ providers: { "workbuddy-cn": { apiKeyEnv: "WORKBUDDY_API_KEY" } } }), "api-key");
   assert.equal(authenticationMode({ providers: { "workbuddy-cn": {} } }), "token");
   assert.equal(authenticationMode({ providers: { "codebuddy-cn": {} } }), "token");
+  assert.equal(authenticationMode({ providers: { "workbuddy-global": {} } }, WORKBUDDY_GLOBAL), "token");
+  assert.equal(authenticationMode({ providers: { "workbuddy-cn": {} } }, WORKBUDDY_GLOBAL), "api-key");
+});
+
+test("WebUI 按 Provider 隔离认证状态并将国际版模型请求路由到国际站", async () => {
+  const routes = new Map();
+  const credentials = new Map([
+    [WORKBUDDY_CN.sessionsRef, serializeWorkBuddySessions(createWorkBuddySessionStore([{
+      auth: { accessToken: "cn-access", refreshToken: "cn-refresh", expiresAt: Date.now() + 60_000_000 },
+      account: { userId: "cn-user" },
+    }]))],
+    [WORKBUDDY_GLOBAL.apiKeyEnv, "global-key"],
+  ]);
+  let catalogRequest;
+  const settingsValue = {
+    providers: {
+      [WORKBUDDY_CN.provider]: {},
+      [WORKBUDDY_GLOBAL.provider]: { apiKeyEnv: WORKBUDDY_GLOBAL.apiKeyEnv },
+    },
+  };
+  const webCtx = {
+    credentials: {
+      async resolve(ref) {
+        const value = credentials.get(String(ref));
+        return value ? { value, source: "test" } : undefined;
+      },
+      async set(ref, value) {
+        credentials.set(String(ref), value);
+      },
+      async unset(ref) {
+        credentials.delete(String(ref));
+      },
+    },
+    settings: {
+      get() {
+        return settingsValue;
+      },
+      async mutate() {},
+    },
+    webServer: {
+      register(entry) {
+        routes.set(entry.path, entry.handler);
+        return () => {};
+      },
+    },
+    effect(callback) {
+      callback();
+    },
+  };
+  installWorkBuddyWeb({ inject(_deps, callback) { callback(webCtx); } }, {
+    async fetchModelCatalog(region, credential) {
+      catalogRequest = { region, credential };
+      return [{ id: "global-model", name: "Global Model" }];
+    },
+  });
+
+  const cnStatus = await invokeRoute(routes.get("/dsh-llm-workbuddy/auth/status"), { provider: WORKBUDDY_CN.provider });
+  const globalStatus = await invokeRoute(routes.get("/dsh-llm-workbuddy/auth/status"), { provider: WORKBUDDY_GLOBAL.provider });
+  assert.equal(cnStatus.body.activeAccountId, "user:cn-user");
+  assert.equal(globalStatus.body.activeAccountId, null);
+  assert.equal(globalStatus.body.apiKeyConfigured, true);
+
+  const models = await invokeRoute(routes.get("/dsh-llm-workbuddy/auth/models"), { provider: WORKBUDDY_GLOBAL.provider });
+  assert.equal(models.status, 200);
+  assert.equal(models.body.provider, WORKBUDDY_GLOBAL.provider);
+  assert.equal(catalogRequest.region, WORKBUDDY_GLOBAL);
+  assert.deepEqual(catalogRequest.credential, { value: "global-key", kind: "api-key", ref: WORKBUDDY_GLOBAL.apiKeyEnv });
+});
+
+test("国际版使用独立 Provider、凭据和官方国际站端点", () => {
+  assert.equal(workBuddyRegion("workbuddy-global"), WORKBUDDY_GLOBAL);
+  assert.equal(WORKBUDDY_GLOBAL.baseUrl, "https://www.codebuddy.ai/v2");
+  assert.equal(WORKBUDDY_GLOBAL.configUrl, "https://www.codebuddy.ai/v3/config");
+  assert.equal(WORKBUDDY_GLOBAL.authBaseUrl, "https://www.codebuddy.ai/v2/plugin");
+  assert.notEqual(WORKBUDDY_GLOBAL.sessionsRef, WORKBUDDY_CN.sessionsRef);
+  assert.notEqual(WORKBUDDY_GLOBAL.apiKeysRef, WORKBUDDY_CN.apiKeysRef);
+  const [model] = __testing.modelsFromConfig({
+    agents: [{ name: "cli", models: ["global-model"] }],
+    models: [{ id: "global-model", maxInputTokens: 1000, maxOutputTokens: 100 }],
+  }, WORKBUDDY_GLOBAL);
+  assert.equal(model.provider, "workbuddy-global");
+  assert.equal(model.baseUrl, "https://www.codebuddy.ai/v2");
+});
+
+test("国际版模型目录请求发送到国际站并沿用 WorkBuddy 配置格式", async () => {
+  const originalFetch = globalThis.fetch;
+  let request;
+  globalThis.fetch = async (url, options) => {
+    request = { url, options };
+    return new Response(JSON.stringify({ code: 0, data: {
+      agents: [{ name: "cli", models: ["global-model"] }],
+      models: [{ id: "global-model", name: "Global Model", maxInputTokens: 1000, maxOutputTokens: 100 }],
+    } }), { status: 200 });
+  };
+  try {
+    const models = await __testing.fetchWorkBuddyModels(WORKBUDDY_GLOBAL, { value: "global-key", kind: "api-key" });
+    assert.equal(request.url, "https://www.codebuddy.ai/v3/config");
+    assert.equal(request.options.headers["x-api-key"], "global-key");
+    assert.equal(models.find((model) => model.id === "global-model")?.provider, "workbuddy-global");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("登录会话可以安全序列化并按过期时间刷新", () => {
@@ -293,6 +427,26 @@ test("插件直接调用官方刷新接口且不复用旧过期时间", async ()
   }
 });
 
+test("国际版令牌刷新使用国际站且不读取中国区会话", async () => {
+  const originalFetch = globalThis.fetch;
+  let request;
+  globalThis.fetch = async (url, options) => {
+    request = { url, options };
+    return new Response(JSON.stringify({ code: 0, data: { accessToken: "global-access", expiresIn: 3600 } }), { status: 200 });
+  };
+  try {
+    const refreshed = await refreshWorkBuddySession({
+      auth: { accessToken: "old-global", refreshToken: "global-refresh", expiresAt: 1 },
+      account: { userId: "global-user" },
+    }, undefined, WORKBUDDY_GLOBAL);
+    assert.equal(request.url, "https://www.codebuddy.ai/v2/plugin/auth/token/refresh");
+    assert.equal(request.options.headers["X-Refresh-Token"], "global-refresh");
+    assert.equal(refreshed.auth.accessToken, "global-access");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("模型目录保留逐模型思考能力和默认档位", () => {
   const models = __testing.modelsFromConfig({
     agents: [{ name: "cli", models: ["reasoning", "plain"] }],
@@ -364,6 +518,27 @@ test("积分查询复用 WorkBuddy billing 接口并汇总有效资源", async (
   }
 });
 
+test("国际版积分查询使用国际站 billing 域名", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (url) => {
+    requests.push(String(url));
+    if (String(url).includes("get-user-resource")) {
+      return new Response(JSON.stringify({ code: 0, data: { Response: { Data: { Accounts: [] } } } }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ code: 0, data: { total: 0, data: [] } }), { status: 200 });
+  };
+  try {
+    await fetchWorkBuddyCredits({ auth: { accessToken: "global-token" }, account: { userId: "global-user" } }, { region: WORKBUDDY_GLOBAL });
+    assert.deepEqual(requests, [
+      "https://www.codebuddy.ai/v2/billing/meter/get-user-resource",
+      "https://www.codebuddy.ai/billing/meter/get-user-request-usage",
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("企业积分响应支持不限量和周期重置时间", () => {
   const result = creditsTesting.enterpriseUsage({ data: { limitNum: -1, cycleResetTime: "2026-09-01 00:00:00" } });
   assert.equal(result.unlimited, true);
@@ -374,6 +549,8 @@ test("企业积分响应支持不限量和周期重置时间", () => {
 test("积分查询只接受受信任的 WorkBuddy billing 域名", () => {
   assert.equal(creditsTesting.normalizeHost("https://www.codebuddy.cn"), "https://www.codebuddy.cn");
   assert.equal(creditsTesting.normalizeHost("https://evil.example"), "https://www.codebuddy.cn");
+  assert.equal(creditsTesting.normalizeHost("https://www.codebuddy.ai", WORKBUDDY_GLOBAL), "https://www.codebuddy.ai");
+  assert.equal(creditsTesting.normalizeHost("https://www.codebuddy.cn", WORKBUDDY_GLOBAL), "https://www.codebuddy.ai");
   assert.deepEqual(creditsTesting.buildCreditResourceBody(new Date(2026, 7, 31, 9, 8, 7)), {
     PageNumber: 1,
     PageSize: 100,
