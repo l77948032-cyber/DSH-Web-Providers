@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import { __testing, apply } from "./index.js";
+import { DOUBAO_MODELS, __testing as doubaoTesting, buildDoubaoRequest, formatDoubaoPrompt, parseDoubaoSseData } from "./doubao-provider.js";
+import { DOUBAO_PROVIDER, createDoubaoSession, parseDoubaoSession, serializeDoubaoSession } from "./doubao-session.js";
 import {
   workBuddyApiKeyEntries,
   activeWorkBuddySession,
@@ -139,10 +141,10 @@ test("插件使用独立命名空间且不禁用原生 pi-ai Adapter", () => {
   assert.equal(__testing.settingsNamespace, "llm-workbuddy");
   assert.doesNotMatch(patch, /id:\s*llm-pi-ai/);
   assert.doesNotMatch(patch, /disabled:\s*true/);
-  assert.match(patch, /@l77948032-cyber\/dsh-workbuddy/);
+  assert.match(patch, /@l77948032-cyber\/dsh-web-providers/);
 });
 
-test("运行时只注册中国区和国际版 WorkBuddy，不接管已有自定义 Provider", () => {
+test("运行时统一注册 WorkBuddy 和豆包，不接管已有自定义 Provider", () => {
   const seen = { adapters: [], directories: [], discoveries: [] };
   const replaceable = () => Object.assign(() => {}, { replace() {} });
   const ctx = {
@@ -174,9 +176,83 @@ test("运行时只注册中国区和国际版 WorkBuddy，不接管已有自定�
     },
   });
 
-  assert.deepEqual(seen.adapters, [["workbuddy-cn", "workbuddy-global"]]);
-  assert.deepEqual(seen.directories.map((entries) => entries.map((entry) => entry.provider)), [["workbuddy-cn", "workbuddy-global"]]);
+  assert.deepEqual(seen.adapters, [["workbuddy-cn", "workbuddy-global", "doubao-web"]]);
+  assert.deepEqual(seen.directories.map((entries) => entries.map((entry) => entry.provider)), [["workbuddy-cn", "workbuddy-global", "doubao-web"]]);
   assert.deepEqual(seen.discoveries, ["llm-workbuddy"]);
+});
+
+test("豆包网页登录会话只接受 doubao.com 登录 Cookie 并可稳定序列化", () => {
+  const session = createDoubaoSession({
+    cookies: [
+      { name: "sessionid", value: "secret", domain: ".doubao.com", path: "/", expires: -1 },
+      { name: "foreign", value: "ignored", domain: ".example.com", path: "/", expires: -1 },
+    ],
+    origins: [{ origin: "https://www.doubao.com", localStorage: [{ name: "web_id", value: "123" }] }],
+  }, { params: { web_id: "123" }, userAgent: "test-browser" });
+  const restored = parseDoubaoSession(serializeDoubaoSession(session));
+
+  assert.equal(restored.storageState.cookies.length, 1);
+  assert.equal(restored.storageState.origins.length, 1);
+  assert.equal(restored.params.web_id, "123");
+  assert.equal(restored.userAgent, "test-browser");
+  assert.throws(() => createDoubaoSession({ cookies: [], origins: [] }), /没有检测到/);
+});
+
+test("豆包请求把 DSH 完整上下文和工具定义装入单条网页消息", () => {
+  const context = {
+    systemPrompt: "遵循系统指令",
+    messages: [
+      { role: "user", content: "先读取文件", timestamp: 1 },
+      { role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "read_file", arguments: { path: "a.txt" } }], timestamp: 2 },
+      { role: "toolResult", toolCallId: "call-1", toolName: "read_file", content: [{ type: "text", text: "内容" }], isError: false, timestamp: 3 },
+    ],
+    tools: [{ name: "read_file", description: "读取文件", parameters: { type: "object", properties: { path: { type: "string" } } } }],
+  };
+  const prompt = formatDoubaoPrompt(context);
+  const body = buildDoubaoRequest(context, DOUBAO_MODELS[0]);
+
+  assert.match(prompt, /遵循系统指令/);
+  assert.match(prompt, /read_file/);
+  assert.match(prompt, /tool_call_id/);
+  assert.equal(body.client_meta.bot_id, "7338286299411103781");
+  assert.equal(body.option.need_create_conversation, true);
+  assert.equal(body.option.need_deep_think, 0);
+  assert.equal(body.messages[0].content_block[0].content.text_block.text, prompt);
+  assert.equal(buildDoubaoRequest(context, DOUBAO_MODELS[1]).option.need_deep_think, 1);
+});
+
+test("豆包 SSE 解析文本、思考和结束事件", () => {
+  const text = parseDoubaoSseData(`data: ${JSON.stringify({
+    event_type: 2001,
+    event_data: JSON.stringify({ conversation_id: "conversation", message: { content_type: 2001, content: JSON.stringify({ text: "OK" }) } }),
+  })}`);
+  const thinking = parseDoubaoSseData(`data: ${JSON.stringify({
+    event_type: 2001,
+    event_data: JSON.stringify({ message: { content_type: 2008, content: JSON.stringify({ text: "分析" }) } }),
+  })}`);
+
+  assert.deepEqual(text, { done: false, error: undefined, conversationId: "conversation", text: "OK", thinking: "" });
+  assert.equal(thinking.text, "");
+  assert.equal(thinking.thinking, "分析");
+  assert.equal(parseDoubaoSseData('data: {"event_type":2003,"event_data":"{}"}').done, true);
+  const current = parseDoubaoSseData(`data: ${JSON.stringify({
+    message_id: "message",
+    patch_op: [{ patch_object: 102, patch_type: 1, patch_value: { content: JSON.stringify({ text: "新协议" }) } }],
+  })}`);
+  assert.equal(current.text, "新协议");
+  assert.equal(parseDoubaoSseData('data: {"end_type":3}').done, true);
+});
+
+test("豆包工具信封只接受当前 DSH 已声明的工具", () => {
+  const tools = [{ name: "read_file" }];
+  const valid = doubaoTesting.parseToolCalls('<dsh_tool_calls>{"tool_calls":[{"name":"read_file","arguments":{"path":"a.txt"}}]}</dsh_tool_calls>', tools);
+  const unknown = doubaoTesting.parseToolCalls('<dsh_tool_calls>{"tool_calls":[{"name":"delete_all","arguments":{}}]}</dsh_tool_calls>', tools);
+
+  assert.equal(valid.length, 1);
+  assert.equal(valid[0].name, "read_file");
+  assert.deepEqual(valid[0].arguments, { path: "a.txt" });
+  assert.equal(unknown, undefined);
+  assert.equal(DOUBAO_PROVIDER, "doubao-web");
 });
 
 test("API Key 和登录令牌使用各自的认证头", () => {

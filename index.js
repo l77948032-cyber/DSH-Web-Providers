@@ -5,6 +5,9 @@ import { Config, PiAiAdapter } from "@deepseek-ai/dsh-llm-pi-ai";
 import * as dshSettings from "@deepseek-ai/dsh-settings";
 import { createProvider } from "@earendil-works/pi-ai";
 import * as openAICompletionsApi from "@earendil-works/pi-ai/api/openai-completions";
+import { closeDoubaoRuntime } from "./doubao-browser.js";
+import { DOUBAO_API, DOUBAO_MODELS, doubaoApi } from "./doubao-provider.js";
+import { DOUBAO_PROVIDER, DOUBAO_SESSION_REF, parseDoubaoSession, serializeDoubaoSession } from "./doubao-session.js";
 import {
   activeWorkBuddySession,
   createWorkBuddySessionStore,
@@ -34,6 +37,7 @@ export const inject = ["llm"];
 const NS = typeof dshSettings.settingsNamespace === "function" ? dshSettings.settingsNamespace("llm-workbuddy") : "llm-workbuddy";
 const PROVIDER = WORKBUDDY_CN.provider;
 const WORKBUDDY_PROVIDERS = new Set(allWorkBuddyProviderIds());
+const ALL_PROVIDERS = [...WORKBUDDY_REGIONS.map((region) => region.provider), DOUBAO_PROVIDER];
 const USER_AGENT = "CLI/unknown CodeBuddy/2.137.1";
 const STREAM_IDLE_TIMEOUT_MS = 300_000;
 const NO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -244,6 +248,31 @@ function workBuddyProvider(regionValue, models) {
   });
 }
 
+function doubaoWebAuth() {
+  return {
+    name: "豆包网页登录状态",
+    login: async () => {
+      throw new Error("请运行 dsh-web-providers login doubao 完成豆包网页登录");
+    },
+    resolve: async ({ credential, signal } = {}) => {
+      signal?.throwIfAborted?.();
+      if (!credential?.key) return undefined;
+      return { auth: { apiKey: credential.key }, source: "DSH credential" };
+    },
+  };
+}
+
+function doubaoProvider(models = DOUBAO_MODELS) {
+  return createProvider({
+    id: DOUBAO_PROVIDER,
+    name: "豆包（网页登录）",
+    baseUrl: "https://www.doubao.com",
+    auth: { apiKey: doubaoWebAuth() },
+    models,
+    api: doubaoApi,
+  });
+}
+
 function resolvedProfile(provider, source, piProvider, configuredMaxTokens = new Map()) {
   const apiKeyEnv = source.apiKeyEnv === undefined ? undefined : credentialRef(source.apiKeyEnv);
   return {
@@ -329,12 +358,16 @@ export const __testing = Object.freeze({
   selectWorkBuddyModels,
   provider: PROVIDER,
   providers: WORKBUDDY_REGIONS.map((region) => region.provider),
+  allProviders: ALL_PROVIDERS,
+  doubaoProvider,
+  doubaoWebAuth,
   regions: WORKBUDDY_REGIONS,
   settingsNamespace: NS,
 });
 
 export function apply(ctx, config) {
   installWorkBuddyWeb(ctx, { fetchModelCatalog: fetchWorkBuddyModelCatalog });
+  ctx.effect?.(() => () => void closeDoubaoRuntime());
   let current = () => config;
   const remoteModels = new Map();
   const remoteModelsKey = new Map();
@@ -353,6 +386,7 @@ export function apply(ctx, config) {
         ?? region.aliases.map((provider) => providers[provider]).find((profile) => profile !== undefined);
       additions[region.provider] = configured ?? { apiKeyEnv: region.apiKeyEnv };
     }
+    additions[DOUBAO_PROVIDER] = providers[DOUBAO_PROVIDER] ?? {};
     return {
       ...raw,
       providers: {
@@ -378,6 +412,28 @@ export function apply(ctx, config) {
         displayName: region.displayName,
       }, workBuddyProvider(region, models), configured));
     }
+    const doubaoSource = raw.providers[DOUBAO_PROVIDER] ?? {};
+    const doubaoModels = Array.isArray(doubaoSource.models) && doubaoSource.models.length
+      ? doubaoSource.models.map((entry) => {
+        const base = DOUBAO_MODELS.find((model) => model.id === entry.id);
+        return {
+          ...(base ?? DOUBAO_MODELS[0]),
+          id: entry.id,
+          name: entry.name ?? base?.name ?? entry.id,
+          contextWindow: entry.contextWindow ?? base?.contextWindow ?? 128_000,
+          maxTokens: entry.maxTokens ?? base?.maxTokens ?? 16_000,
+          provider: DOUBAO_PROVIDER,
+          api: DOUBAO_API,
+        };
+      })
+      : DOUBAO_MODELS;
+    const configured = new Map((doubaoSource.models ?? []).flatMap((model) =>
+      Number.isSafeInteger(model.maxTokens) && model.maxTokens > 0 ? [[model.id, model.maxTokens]] : [],
+    ));
+    result.set(DOUBAO_PROVIDER, resolvedProfile(DOUBAO_PROVIDER, {
+      ...doubaoSource,
+      displayName: "豆包（网页登录）",
+    }, doubaoProvider(doubaoModels), configured));
     memoRaw = current();
     memoGeneration = generation;
     memoized = result;
@@ -429,6 +485,19 @@ export function apply(ctx, config) {
   };
 
   const resolveCredential = async (provider, profile) => {
+    if (provider === DOUBAO_PROVIDER) {
+      const ref = credentialRef(DOUBAO_SESSION_REF);
+      const stored = await ctx.get("credentials")?.resolve(ref);
+      const value = stored?.value ?? launchEnvironmentOf(ctx).get(ref)?.value;
+      if (!value) {
+        throw new LlmError(`${name}: 未找到豆包网页登录状态，请运行 dsh-web-providers login doubao`, "MISSING_CREDENTIAL");
+      }
+      try {
+        return { value: serializeDoubaoSession(parseDoubaoSession(value)), kind: "web-session", ref };
+      } catch (error) {
+        throw new LlmError(`${name}: 豆包网页登录状态无效，请重新登录`, "MISSING_CREDENTIAL", { cause: error });
+      }
+    }
     const region = workBuddyRegion(provider);
     const ref = profile.apiKeyEnv;
     if (!ref && WORKBUDDY_PROVIDERS.has(provider)) {
@@ -506,18 +575,35 @@ export function apply(ctx, config) {
     return listModels(provider);
   };
 
-  const directoryEntries = () => WORKBUDDY_REGIONS.map((region) => ({
-    provider: region.provider,
-    displayName: region.displayName,
-    settingsNs: NS,
-    settingsPath: ["providers", region.provider],
-    declared: false,
-  }));
+  const directoryEntries = () => [
+    ...WORKBUDDY_REGIONS.map((region) => ({
+      provider: region.provider,
+      displayName: region.displayName,
+      settingsNs: NS,
+      settingsPath: ["providers", region.provider],
+      declared: false,
+    })),
+    {
+      provider: DOUBAO_PROVIDER,
+      displayName: "豆包（网页登录）",
+      settingsNs: NS,
+      settingsPath: ["providers", DOUBAO_PROVIDER],
+      declared: false,
+    },
+  ];
 
   let directory = ctx.llm.registerConfigurableProviders(directoryEntries());
-  let registration = ctx.llm.registerAdapter(WORKBUDDY_REGIONS.map((region) => region.provider), adapter);
+  let registration = ctx.llm.registerAdapter(ALL_PROVIDERS, adapter);
 
   ctx.llm.registerModelDiscovery(NS, async (request, signal) => {
+    if (request.provider === DOUBAO_PROVIDER) {
+      return DOUBAO_MODELS.map((model) => ({
+        id: model.id,
+        name: model.name,
+        contextWindow: model.contextWindow,
+        maxTokens: model.maxTokens,
+      }));
+    }
     const region = WORKBUDDY_REGIONS.find((entry) => entry.provider === request.provider);
     if (!region) {
       throw new LlmError(`没有 Provider "${request.provider ?? ""}" 的模型目录`, "DISCOVERY_FAILED");
@@ -547,7 +633,7 @@ export function apply(ctx, config) {
     onChange() {
       memoRaw = undefined;
       profiles();
-      registration.replace(WORKBUDDY_REGIONS.map((region) => region.provider));
+      registration.replace(ALL_PROVIDERS);
       directory.replace(directoryEntries());
     },
   });

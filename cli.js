@@ -7,6 +7,8 @@ import { createRequire } from "node:module";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { parseDocument } from "yaml";
+import { loginDoubaoWeb } from "./doubao-browser.js";
+import { DOUBAO_PROVIDER, DOUBAO_SESSION_REF, parseDoubaoSession, serializeDoubaoSession } from "./doubao-session.js";
 import {
   createWorkBuddySessionStore,
   loginWorkBuddy,
@@ -18,10 +20,12 @@ import {
 } from "./workbuddy-auth.js";
 import { WORKBUDDY_CN, WORKBUDDY_GLOBAL, WORKBUDDY_REGIONS, workBuddyRegion } from "./workbuddy-regions.js";
 
-const PACKAGE = "@l77948032-cyber/dsh-workbuddy";
-const LEGACY_PACKAGES = ["@axiaohungry/dsh-llm-workbuddy", "dsh-llm-workbuddy", "dsh-llm-codebuddy"];
+const PACKAGE = "@l77948032-cyber/dsh-web-providers";
+const LEGACY_PACKAGES = ["@l77948032-cyber/dsh-workbuddy", "@axiaohungry/dsh-llm-workbuddy", "dsh-llm-workbuddy", "dsh-llm-codebuddy"];
 const PACKAGE_VERSION = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version;
-const PACKAGE_SPEC = process.env.DSH_WORKBUDDY_PACKAGE_SPEC || `github:l77948032-cyber/DSH-Workbuddy#v${PACKAGE_VERSION}`;
+const PACKAGE_SPEC = process.env.DSH_WEB_PROVIDERS_PACKAGE_SPEC
+  || process.env.DSH_WORKBUDDY_PACKAGE_SPEC
+  || `github:l77948032-cyber/DSH-Web-Providers#v${PACKAGE_VERSION}`;
 const SETTINGS_NS = "llm-workbuddy";
 const PROVIDER_PATH = [SETTINGS_NS, "providers", WORKBUDDY_CN.provider];
 const LEGACY_PROVIDER_PATH = [SETTINGS_NS, "providers", WORKBUDDY_CN.aliases[0]];
@@ -121,10 +125,21 @@ function selectedRegion(args = []) {
   return region;
 }
 
+function selectedLogin(args = []) {
+  if (args[0] === "doubao") {
+    if (args.length !== 1) throw new Error(`未知参数：${args.slice(1).join(" ")}`);
+    return { type: "doubao" };
+  }
+  if (args[0] === "workbuddy") return { type: "workbuddy", region: selectedRegion(args.slice(1)) };
+  if (args[0] === "workbuddy-cn") return { type: "workbuddy", region: WORKBUDDY_CN };
+  if (args[0] === "workbuddy-global") return { type: "workbuddy", region: WORKBUDDY_GLOBAL };
+  return { type: "workbuddy", region: selectedRegion(args) };
+}
+
 function writeYamlDocument(file, document, mode) {
   const existingMode = existsSync(file) ? statSync(file).mode & 0o777 : undefined;
   const targetMode = mode ?? existingMode ?? 0o600;
-  const temporary = join(dirname(file), `.workbuddy-${process.pid}-${randomBytes(6).toString("hex")}.tmp`);
+  const temporary = join(dirname(file), `.web-providers-${process.pid}-${randomBytes(6).toString("hex")}.tmp`);
   writeFileSync(temporary, String(document), { encoding: "utf8", flag: "wx", mode: targetMode });
   chmodSync(temporary, targetMode);
   renameSync(temporary, file);
@@ -200,7 +215,7 @@ function cleanSettings(file) {
   const source = readFileSync(file, "utf8");
   const document = parseDocument(source);
   if (document.errors.length) throw new Error(`无法解析 ${file}：${document.errors[0].message}`);
-  const paths = WORKBUDDY_REGIONS.flatMap((region) => [region.provider, ...region.aliases])
+  const paths = [...WORKBUDDY_REGIONS.flatMap((region) => [region.provider, ...region.aliases]), DOUBAO_PROVIDER]
     .map((provider) => [SETTINGS_NS, "providers", provider])
     .filter((path) => document.hasIn(path));
   if (paths.length === 0) return undefined;
@@ -211,6 +226,21 @@ function cleanSettings(file) {
   copyFileSync(file, backup);
   writeYamlDocument(file, document);
   return backup;
+}
+
+function enableDoubaoLogin(home = dshHome()) {
+  const file = join(home, "settings.yaml");
+  const source = existsSync(file) ? readFileSync(file, "utf8") : "{}\n";
+  const document = parseDocument(source);
+  if (document.errors.length) throw new Error(`无法解析 ${file}：${document.errors[0].message}`);
+  const providerPath = [SETTINGS_NS, "providers", DOUBAO_PROVIDER];
+  if (document.hasIn(providerPath)) document.deleteIn([...providerPath, "apiKeyEnv"]);
+  else document.setIn(providerPath, document.createNode({}));
+  if (existsSync(file)) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    copyFileSync(file, `${file}.web-providers-backup-${stamp}`);
+  }
+  writeYamlDocument(file, document);
 }
 
 function enableTokenLogin(home = dshHome(), regionValue = WORKBUDDY_CN) {
@@ -259,8 +289,34 @@ function storeLoginSession(session, home = dshHome(), regionValue = WORKBUDDY_CN
   writeYamlDocument(file, document, 0o600);
 }
 
+function storeDoubaoLoginSession(session, home = dshHome()) {
+  const file = join(home, ".credentials.yaml");
+  const document = parseDocument(existsSync(file) ? readFileSync(file, "utf8") : "version: 1\nrecords: {}\nrefs: {}\n");
+  if (document.errors.length) throw new Error(`无法解析 ${file}：${document.errors[0].message}`);
+  setCredentialValue(document, DOUBAO_SESSION_REF, serializeDoubaoSession(session));
+  if (existsSync(file)) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const backup = `${file}.web-providers-backup-${stamp}`;
+    copyFileSync(file, backup);
+    chmodSync(backup, 0o600);
+  }
+  writeYamlDocument(file, document, 0o600);
+}
+
 async function login(args = []) {
-  const region = selectedRegion(args);
+  const target = selectedLogin(args);
+  if (target.type === "doubao") {
+    console.log("正在打开独立的豆包网页登录窗口，不会读取豆包桌面端数据……");
+    const session = await loginDoubaoWeb((status) => {
+      if (status === "opened") console.log("请在窗口中完成豆包登录，登录成功后无需手动关闭窗口。");
+      if (status === "detected") console.log("已识别网页登录状态，正在安全保存到 DSH 凭据。");
+    });
+    storeDoubaoLoginSession(session);
+    enableDoubaoLogin();
+    console.log("豆包网页登录成功。请重启 DSH 后选择“豆包（网页登录）”。");
+    return;
+  }
+  const region = target.region;
   console.log(`正在打开${region.siteName}网页登录（无需安装 WorkBuddy CLI）……`);
   const session = await loginWorkBuddy((url, opened) => {
     if (opened) console.log("浏览器登录页已打开，请在浏览器中完成登录。");
@@ -284,7 +340,7 @@ function install(args) {
       runDsh(["plugin", "--profile", profile, "add", PACKAGE_SPEC]);
     });
   }
-  console.log("WorkBuddy Provider 已安装。请重启 DSH 后进行配置。");
+  console.log("WorkBuddy 与豆包网页 Provider 已安装。请重启 DSH 后进行配置。");
 }
 
 function uninstall(home = dshHome(), args = []) {
@@ -301,12 +357,12 @@ function uninstall(home = dshHome(), args = []) {
     }
     cleanPnpmWorkspace(workspace);
   }
-  console.log(backup ? `WorkBuddy 配置已清理，备份：${backup}` : "未发现 WorkBuddy Provider 配置。");
+  console.log(backup ? `Provider 配置已清理，备份：${backup}` : "未发现 Provider 配置。");
   console.log("插件已卸载，API Key 和登录令牌凭据保持不变。请重启 DSH。");
 }
 
 function selfTest() {
-  const root = mkdtempSync(join(tmpdir(), "dsh-workbuddy-cli-"));
+  const root = mkdtempSync(join(tmpdir(), "dsh-web-providers-cli-"));
   try {
     const file = join(root, "settings.yaml");
     writeFileSync(file, "llm-pi-ai:\n  providers:\n    opencode-go:\n      apiKeyEnv: OPENCODE_GO_API_KEY\nllm-workbuddy:\n  providers:\n    codebuddy-cn:\n      apiKeyEnv: WORKBUDDY_CN_API_KEY\n      models:\n        - id: legacy-model\n", "utf8");
@@ -355,6 +411,25 @@ function selfTest() {
     if ((statSync(credentialsFile).mode & 0o777) !== 0o600) {
       throw new Error("token credential file permissions self-test failed");
     }
+    const doubaoSession = {
+      version: 1,
+      kind: "doubao-web",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      params: { web_id: "test-web-id" },
+      storageState: {
+        cookies: [{ name: "sessionid", value: "test-session", domain: ".doubao.com", path: "/", expires: -1 }],
+        origins: [],
+      },
+    };
+    storeDoubaoLoginSession(doubaoSession, root);
+    enableDoubaoLogin(root);
+    const doubaoCredentials = parseDocument(readFileSync(credentialsFile, "utf8"));
+    assertDoubaoCredential(doubaoCredentials.getIn(["refs", DOUBAO_SESSION_REF]));
+    const doubaoSettings = parseDocument(readFileSync(file, "utf8"));
+    if (!doubaoSettings.hasIn([SETTINGS_NS, "providers", DOUBAO_PROVIDER])) {
+      throw new Error("doubao provider settings self-test failed");
+    }
     const workspace = join(root, "pnpm-workspace.yaml");
     writeFileSync(workspace, "packages:\n  - .\nallowBuilds:\n  '@google/genai': true\n  protobufjs: pending\n", "utf8");
     withPnpmBuildPolicy(workspace, () => {
@@ -385,6 +460,12 @@ function selfTest() {
   }
 }
 
+function assertDoubaoCredential(value) {
+  if (parseDoubaoSession(value).params.web_id !== "test-web-id") {
+    throw new Error("doubao web credential storage self-test failed");
+  }
+}
+
 const command = process.argv[2];
 const args = process.argv.slice(3);
 if (command === "install") install(args);
@@ -392,7 +473,8 @@ else if (command === "uninstall") uninstall(dshHome(), args);
 else if (command === "login") await login(args);
 else if (command === "--self-test") selfTest();
 else {
-  console.log("用法：dsh-workbuddy install|uninstall [--profile desktop|web|headless]");
-  console.log("      dsh-workbuddy login [--region cn|global]");
+  console.log("用法：dsh-web-providers install|uninstall [--profile desktop|web|headless]");
+  console.log("      dsh-web-providers login doubao");
+  console.log("      dsh-web-providers login workbuddy [--region cn|global]");
   process.exitCode = 1;
 }

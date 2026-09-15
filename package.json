@@ -1,12 +1,14 @@
 {
-  "name": "@l77948032-cyber/dsh-workbuddy",
-  "version": "1.2.0",
-  "description": "以独立 Provider 为 DeepSeek Harness 接入 WorkBuddy 中国区与国际版",
+  "name": "@l77948032-cyber/dsh-web-providers",
+  "version": "2.0.0",
+  "description": "为 DeepSeek Harness 接入 WorkBuddy 中国区、国际版与豆包网页登录",
   "author": "l77948032-cyber; based on Axiaohungry/dsh-llm-workbuddy",
   "keywords": [
     "deepseek-harness",
     "dsh",
     "workbuddy",
+    "doubao",
+    "web-login",
     "llm",
     "provider"
   ],
@@ -15,18 +17,21 @@
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
+    "./doubao-provider": "./doubao-provider.js",
+    "./doubao-session": "./doubao-session.js",
     "./package.json": "./package.json"
   },
   "bin": {
+    "dsh-web-providers": "cli.js",
     "dsh-workbuddy": "cli.js"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/l77948032-cyber/DSH-Workbuddy.git"
+    "url": "git+https://github.com/l77948032-cyber/DSH-Web-Providers.git"
   },
-  "homepage": "https://github.com/l77948032-cyber/DSH-Workbuddy#readme",
+  "homepage": "https://github.com/l77948032-cyber/DSH-Web-Providers#readme",
   "bugs": {
-    "url": "https://github.com/l77948032-cyber/DSH-Workbuddy/issues"
+    "url": "https://github.com/l77948032-cyber/DSH-Web-Providers/issues"
   },
   "files": [
     "index.js",
@@ -35,6 +40,9 @@
     "workbuddy-models.js",
     "workbuddy-regions.js",
     "workbuddy-web.js",
+    "doubao-browser.js",
+    "doubao-provider.js",
+    "doubao-session.js",
     "client.js",
     "cli.js",
     "cordis.patch.yml",
@@ -43,7 +51,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "check": "node --check index.js && node --check workbuddy-regions.js && node --check workbuddy-auth.js && node --check workbuddy-credits.js && node --check workbuddy-models.js && node --check workbuddy-web.js && node --check client.js && node --check cli.js && node --test test.js && node cli.js --self-test"
+    "check": "node --check index.js && node --check workbuddy-regions.js && node --check workbuddy-auth.js && node --check workbuddy-credits.js && node --check workbuddy-models.js && node --check workbuddy-web.js && node --check doubao-session.js && node --check doubao-browser.js && node --check doubao-provider.js && node --check client.js && node --check cli.js && node --test test.js && node cli.js --self-test"
   },
   "dsh": {
     "engines": {
@@ -62,6 +70,7 @@
   },
   "dependencies": {
     "@earendil-works/pi-ai": "^0.85.1",
+    "playwright-core": "^1.63.0",
     "pnpm": "11.19.0",
     "yaml": "2.9.0"
   },

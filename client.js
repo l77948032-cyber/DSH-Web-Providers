@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-  id: "@l77948032-cyber/dsh-workbuddy",
+  id: "@l77948032-cyber/dsh-web-providers",
   factory: (require) => {
     const ROUTE = "/dsh-llm-workbuddy/auth";
     const MARKER = "data-workbuddy-auth-switch";
@@ -329,7 +329,7 @@ window.__ModuleLoader__.load({
     function installComposerDockLayout() {
       if (typeof document === "undefined" || document.querySelector('style[data-plugin-css="dsh-llm-workbuddy-composer-dock"]')) return;
       const style = document.createElement("style");
-      style.dataset.plugin = "@l77948032-cyber/dsh-workbuddy";
+      style.dataset.plugin = "@l77948032-cyber/dsh-web-providers";
       style.dataset.pluginCss = "dsh-llm-workbuddy-composer-dock";
       style.textContent = `
 [data-slot="conversation.composer.dock"]:has(> [data-composer-stats]),
@@ -379,7 +379,7 @@ window.__ModuleLoader__.load({
     function installInterfaceStyles() {
       if (typeof document === "undefined" || document.querySelector('style[data-plugin-css="dsh-llm-workbuddy-interface"]')) return;
       const style = document.createElement("style");
-      style.dataset.plugin = "@l77948032-cyber/dsh-workbuddy";
+      style.dataset.plugin = "@l77948032-cyber/dsh-web-providers";
       style.dataset.pluginCss = "dsh-llm-workbuddy-interface";
       style.textContent = `
 .dsh-wb-auth {
