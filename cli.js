@@ -16,7 +16,7 @@ import {
   serializeWorkBuddySessions,
   upsertWorkBuddySession,
 } from "./workbuddy-auth.js";
-import { WORKBUDDY_CN, WORKBUDDY_REGIONS, workBuddyRegion } from "./workbuddy-regions.js";
+import { WORKBUDDY_CN, WORKBUDDY_GLOBAL, WORKBUDDY_REGIONS, workBuddyRegion } from "./workbuddy-regions.js";
 
 const PACKAGE = "@l77948032-cyber/dsh-workbuddy";
 const LEGACY_PACKAGES = ["@axiaohungry/dsh-llm-workbuddy", "dsh-llm-workbuddy", "dsh-llm-codebuddy"];
@@ -130,6 +130,29 @@ function writeYamlDocument(file, document, mode) {
   renameSync(temporary, file);
 }
 
+function credentialsUseRefs(document) {
+  return document.has("version") || document.has("records") || document.has("refs");
+}
+
+function credentialValue(document, ref) {
+  return document.getIn(["refs", ref]) ?? document.get(ref);
+}
+
+function setCredentialValue(document, ref, value) {
+  if (!credentialsUseRefs(document)) {
+    document.set(ref, value);
+    return;
+  }
+  if (!document.has("refs")) document.set("refs", {});
+  document.setIn(["refs", ref], value);
+  document.delete(ref);
+}
+
+function deleteCredentialValue(document, ref) {
+  document.deleteIn(["refs", ref]);
+  document.delete(ref);
+}
+
 function withPnpmBuildPolicy(file, action) {
   const document = parseDocument(readFileSync(file, "utf8"));
   if (document.errors.length) throw new Error(`无法解析 ${file}：${document.errors[0].message}`);
@@ -217,16 +240,16 @@ function enableTokenLogin(home = dshHome(), regionValue = WORKBUDDY_CN) {
 function storeLoginSession(session, home = dshHome(), regionValue = WORKBUDDY_CN) {
   const region = workBuddyRegion(regionValue);
   const file = join(home, ".credentials.yaml");
-  const document = parseDocument(existsSync(file) ? readFileSync(file, "utf8") : "{}\n");
+  const document = parseDocument(existsSync(file) ? readFileSync(file, "utf8") : "version: 1\nrecords: {}\nrefs: {}\n");
   if (document.errors.length) throw new Error(`无法解析 ${file}：${document.errors[0].message}`);
   const stored = [region.sessionsRef, ...region.legacySessionsRefs, region.sessionRef, ...region.legacySessionRefs]
-    .map((ref) => document.get(ref))
+    .map((ref) => credentialValue(document, ref))
     .find((value) => value !== undefined);
   const current = stored ? parseWorkBuddySessions(stored) : createWorkBuddySessionStore();
   const next = upsertWorkBuddySession(current, session);
-  document.set(region.sessionsRef, serializeWorkBuddySessions(next));
-  document.set(region.sessionRef, serializeWorkBuddySession(next.sessions.find((entry) => entry.id === next.activeId)));
-  for (const ref of [...region.legacySessionsRefs, ...region.legacySessionRefs]) document.delete(ref);
+  setCredentialValue(document, region.sessionsRef, serializeWorkBuddySessions(next));
+  setCredentialValue(document, region.sessionRef, serializeWorkBuddySession(next.sessions.find((entry) => entry.id === next.activeId)));
+  for (const ref of [...region.legacySessionsRefs, ...region.legacySessionRefs]) deleteCredentialValue(document, ref);
   if (existsSync(file)) {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const backup = `${file}.workbuddy-backup-${stamp}`;
@@ -305,17 +328,31 @@ function selfTest() {
       auth: { accessToken: "test-access-token", refreshToken: "test-refresh-token", expiresAt: Date.now() + 60_000 },
       account: { userId: "test-user" },
     };
+    const credentialsFile = join(root, ".credentials.yaml");
+    writeFileSync(credentialsFile, "version: 1\nrecords: {}\nrefs:\n  EXISTING_API_KEY: preserved\n", { encoding: "utf8", mode: 0o600 });
     storeLoginSession(sampleSession, root);
-    const storedSession = parseDocument(readFileSync(join(root, ".credentials.yaml"), "utf8")).get(WORKBUDDY_CN.sessionRef);
+    const credentials = parseDocument(readFileSync(credentialsFile, "utf8"));
+    const storedSession = credentials.getIn(["refs", WORKBUDDY_CN.sessionRef]);
     if (parseWorkBuddySession(storedSession).account.userId !== "test-user") {
       throw new Error("token credential storage self-test failed");
     }
-    const storedSessions = parseDocument(readFileSync(join(root, ".credentials.yaml"), "utf8")).get(WORKBUDDY_CN.sessionsRef);
+    const storedSessions = credentials.getIn(["refs", WORKBUDDY_CN.sessionsRef]);
     const sessionStore = parseWorkBuddySessions(storedSessions);
     if (sessionStore.sessions.length !== 1 || sessionStore.activeId !== sessionStore.sessions[0].id) {
       throw new Error("token account list self-test failed");
     }
-    if ((statSync(join(root, ".credentials.yaml")).mode & 0o777) !== 0o600) {
+    if (credentials.getIn(["refs", "EXISTING_API_KEY"]) !== "preserved" || [...credentials.contents.items].some((item) => !["version", "records", "refs"].includes(item.key.value))) {
+      throw new Error("credential envelope preservation self-test failed");
+    }
+    credentials.set(WORKBUDDY_GLOBAL.sessionsRef, storedSessions);
+    credentials.set(WORKBUDDY_GLOBAL.sessionRef, storedSession);
+    writeYamlDocument(credentialsFile, credentials, 0o600);
+    storeLoginSession(sampleSession, root, WORKBUDDY_GLOBAL);
+    const migrated = parseDocument(readFileSync(credentialsFile, "utf8"));
+    if (!migrated.hasIn(["refs", WORKBUDDY_GLOBAL.sessionsRef]) || migrated.has(WORKBUDDY_GLOBAL.sessionsRef) || migrated.has(WORKBUDDY_GLOBAL.sessionRef)) {
+      throw new Error("legacy top-level credential migration self-test failed");
+    }
+    if ((statSync(credentialsFile).mode & 0o777) !== 0o600) {
       throw new Error("token credential file permissions self-test failed");
     }
     const workspace = join(root, "pnpm-workspace.yaml");
